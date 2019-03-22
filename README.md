@@ -1,3 +1,5 @@
+**Fork which zero-pads the line numbers in the gutter**
+
 [![Neovim](https://raw.githubusercontent.com/neovim/neovim.github.io/master/logos/neovim-logo-600x173.png)](https://neovim.io)
 
 [Wiki](https://github.com/neovim/neovim/wiki) |
