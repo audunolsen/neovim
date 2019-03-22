@@ -350,6 +350,7 @@ static void handle_request(Channel *channel, msgpack_object *request)
     }
   } else {
     multiqueue_put(channel->events, on_request_event, 1, evdata);
+    DLOG("RPC: scheduled %.*s", method->via.bin.size, method->via.bin.ptr);
   }
 }
 
@@ -494,8 +495,8 @@ static void broadcast_event(const char *name, Array args)
                                       kv_size(subscribed));
 
   for (size_t i = 0; i < kv_size(subscribed); i++) {
-    Channel *channel = kv_A(subscribed, i);
-    channel_write(channel, buffer);
+    Channel *c = kv_A(subscribed, i);
+    channel_write(c, buffer);
   }
 
 end:
@@ -505,6 +506,11 @@ end:
 static void unsubscribe(Channel *channel, char *event)
 {
   char *event_string = pmap_get(cstr_t)(event_strings, event);
+  if (!event_string) {
+      WLOG("RPC: ch %" PRIu64 ": tried to unsubscribe unknown event '%s'",
+           channel->id, event);
+      return;
+  }
   pmap_del(cstr_t)(channel->rpc.subscribed_events, event_string);
 
   map_foreach_value(channels, channel, {
@@ -635,7 +641,16 @@ static WBuffer *serialize_response(uint64_t channel_id,
 {
   msgpack_packer pac;
   msgpack_packer_init(&pac, sbuffer, msgpack_sbuffer_write);
-  msgpack_rpc_serialize_response(response_id, err, arg, &pac);
+  if (ERROR_SET(err) && response_id == NO_RESPONSE) {
+    Array args = ARRAY_DICT_INIT;
+    ADD(args, INTEGER_OBJ(err->type));
+    ADD(args, STRING_OBJ(cstr_to_string(err->msg)));
+    msgpack_rpc_serialize_request(0, cstr_as_string("nvim_error_event"),
+                                  args, &pac);
+    api_free_array(args);
+  } else {
+    msgpack_rpc_serialize_response(response_id, err, arg, &pac);
+  }
   log_server_msg(channel_id, sbuffer);
   WBuffer *rv = wstream_new_buffer(xmemdup(sbuffer->data, sbuffer->size),
                                    sbuffer->size,
@@ -738,4 +753,3 @@ static void log_msg_close(FILE *f, msgpack_object msg)
   log_unlock();
 }
 #endif
-

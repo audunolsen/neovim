@@ -110,7 +110,7 @@ bool os_isrealdir(const char *name)
 
 /// Check if the given path is a directory or not.
 ///
-/// @return `true` if `fname` is a directory.
+/// @return `true` if `name` is a directory.
 bool os_isdir(const char_u *name)
   FUNC_ATTR_NONNULL_ALL
 {
@@ -124,6 +124,25 @@ bool os_isdir(const char_u *name)
   }
 
   return true;
+}
+
+/// Check if the given path is a directory and is executable.
+/// Gives the same results as `os_isdir()` on Windows.
+///
+/// @return `true` if `name` is a directory and executable.
+bool os_isdir_executable(const char *name)
+  FUNC_ATTR_NONNULL_ALL
+{
+  int32_t mode = os_getperm((const char *)name);
+  if (mode < 0) {
+    return false;
+  }
+
+#ifdef WIN32
+  return (S_ISDIR(mode));
+#else
+  return (S_ISDIR(mode) && (S_IXUSR & mode));
+#endif
 }
 
 /// Check what `name` is:
@@ -269,7 +288,11 @@ static bool is_executable(const char *name)
   // a directory.
   return (S_ISREG(mode));
 #else
-  return (S_ISREG(mode) && (S_IXUSR & mode));
+  int r = -1;
+  if (S_ISREG(mode)) {
+    RUN_UV_FS_FUNC(r, uv_fs_access, name, X_OK, NULL);
+  }
+  return (r == 0);
 #endif
 }
 
@@ -624,7 +647,7 @@ ptrdiff_t os_write(const int fd, const char *const buf, const size_t size,
 ///
 /// @param fd the file descriptor of the file to flush to disk.
 ///
-/// @return `0` on success, a libuv error code on failure.
+/// @return 0 on success, or libuv error code on failure.
 int os_fsync(int fd)
 {
   int r;
@@ -1085,7 +1108,7 @@ char *os_resolve_shortcut(const char *fname)
       if (hr == S_OK && wsz[0] != NUL) {
         const int conversion_result = utf16_to_utf8(wsz, &rfname);
         if (conversion_result != 0) {
-          EMSG2("utf16_to_utf8 failed: %s", uv_strerror(conversion_result));
+          EMSG2("utf16_to_utf8 failed: %d", conversion_result);
         }
       }
 
@@ -1109,127 +1132,3 @@ shortcut_end:
 }
 
 #endif
-
-int os_translate_sys_error(int sys_errno)
-{
-#ifdef HAVE_UV_TRANSLATE_SYS_ERROR
-  return uv_translate_sys_error(sys_errno);
-#elif defined(WIN32)
-  // TODO(equalsraf): libuv does not yet expose uv_translate_sys_error()
-  // in its public API, include a version here until it can be used.
-  // See https://github.com/libuv/libuv/issues/79
-# ifndef ERROR_SYMLINK_NOT_SUPPORTED
-#  define ERROR_SYMLINK_NOT_SUPPORTED 1464
-# endif
-
-  if (sys_errno <= 0) {
-    return sys_errno;  // If < 0 then it's already a libuv error
-  }
-
-  switch (sys_errno) {
-    case ERROR_NOACCESS:                    return UV_EACCES;
-    case WSAEACCES:                         return UV_EACCES;
-    case ERROR_ADDRESS_ALREADY_ASSOCIATED:  return UV_EADDRINUSE;
-    case WSAEADDRINUSE:                     return UV_EADDRINUSE;
-    case WSAEADDRNOTAVAIL:                  return UV_EADDRNOTAVAIL;
-    case WSAEAFNOSUPPORT:                   return UV_EAFNOSUPPORT;
-    case WSAEWOULDBLOCK:                    return UV_EAGAIN;
-    case WSAEALREADY:                       return UV_EALREADY;
-    case ERROR_INVALID_FLAGS:               return UV_EBADF;
-    case ERROR_INVALID_HANDLE:              return UV_EBADF;
-    case ERROR_LOCK_VIOLATION:              return UV_EBUSY;
-    case ERROR_PIPE_BUSY:                   return UV_EBUSY;
-    case ERROR_SHARING_VIOLATION:           return UV_EBUSY;
-    case ERROR_OPERATION_ABORTED:           return UV_ECANCELED;
-    case WSAEINTR:                          return UV_ECANCELED;
-    case ERROR_NO_UNICODE_TRANSLATION:      return UV_ECHARSET;
-    case ERROR_CONNECTION_ABORTED:          return UV_ECONNABORTED;
-    case WSAECONNABORTED:                   return UV_ECONNABORTED;
-    case ERROR_CONNECTION_REFUSED:          return UV_ECONNREFUSED;
-    case WSAECONNREFUSED:                   return UV_ECONNREFUSED;
-    case ERROR_NETNAME_DELETED:             return UV_ECONNRESET;
-    case WSAECONNRESET:                     return UV_ECONNRESET;
-    case ERROR_ALREADY_EXISTS:              return UV_EEXIST;
-    case ERROR_FILE_EXISTS:                 return UV_EEXIST;
-    case ERROR_BUFFER_OVERFLOW:             return UV_EFAULT;
-    case WSAEFAULT:                         return UV_EFAULT;
-    case ERROR_HOST_UNREACHABLE:            return UV_EHOSTUNREACH;
-    case WSAEHOSTUNREACH:                   return UV_EHOSTUNREACH;
-    case ERROR_INSUFFICIENT_BUFFER:         return UV_EINVAL;
-    case ERROR_INVALID_DATA:                return UV_EINVAL;
-    case ERROR_INVALID_PARAMETER:           return UV_EINVAL;
-    case ERROR_SYMLINK_NOT_SUPPORTED:       return UV_EINVAL;
-    case WSAEINVAL:                         return UV_EINVAL;
-    case WSAEPFNOSUPPORT:                   return UV_EINVAL;
-    case WSAESOCKTNOSUPPORT:                return UV_EINVAL;
-    case ERROR_BEGINNING_OF_MEDIA:          return UV_EIO;
-    case ERROR_BUS_RESET:                   return UV_EIO;
-    case ERROR_CRC:                         return UV_EIO;
-    case ERROR_DEVICE_DOOR_OPEN:            return UV_EIO;
-    case ERROR_DEVICE_REQUIRES_CLEANING:    return UV_EIO;
-    case ERROR_DISK_CORRUPT:                return UV_EIO;
-    case ERROR_EOM_OVERFLOW:                return UV_EIO;
-    case ERROR_FILEMARK_DETECTED:           return UV_EIO;
-    case ERROR_GEN_FAILURE:                 return UV_EIO;
-    case ERROR_INVALID_BLOCK_LENGTH:        return UV_EIO;
-    case ERROR_IO_DEVICE:                   return UV_EIO;
-    case ERROR_NO_DATA_DETECTED:            return UV_EIO;
-    case ERROR_NO_SIGNAL_SENT:              return UV_EIO;
-    case ERROR_OPEN_FAILED:                 return UV_EIO;
-    case ERROR_SETMARK_DETECTED:            return UV_EIO;
-    case ERROR_SIGNAL_REFUSED:              return UV_EIO;
-    case WSAEISCONN:                        return UV_EISCONN;
-    case ERROR_CANT_RESOLVE_FILENAME:       return UV_ELOOP;
-    case ERROR_TOO_MANY_OPEN_FILES:         return UV_EMFILE;
-    case WSAEMFILE:                         return UV_EMFILE;
-    case WSAEMSGSIZE:                       return UV_EMSGSIZE;
-    case ERROR_FILENAME_EXCED_RANGE:        return UV_ENAMETOOLONG;
-    case ERROR_NETWORK_UNREACHABLE:         return UV_ENETUNREACH;
-    case WSAENETUNREACH:                    return UV_ENETUNREACH;
-    case WSAENOBUFS:                        return UV_ENOBUFS;
-    case ERROR_BAD_PATHNAME:                return UV_ENOENT;
-    case ERROR_DIRECTORY:                   return UV_ENOENT;
-    case ERROR_FILE_NOT_FOUND:              return UV_ENOENT;
-    case ERROR_INVALID_NAME:                return UV_ENOENT;
-    case ERROR_INVALID_DRIVE:               return UV_ENOENT;
-    case ERROR_INVALID_REPARSE_DATA:        return UV_ENOENT;
-    case ERROR_MOD_NOT_FOUND:               return UV_ENOENT;
-    case ERROR_PATH_NOT_FOUND:              return UV_ENOENT;
-    case WSAHOST_NOT_FOUND:                 return UV_ENOENT;
-    case WSANO_DATA:                        return UV_ENOENT;
-    case ERROR_NOT_ENOUGH_MEMORY:           return UV_ENOMEM;
-    case ERROR_OUTOFMEMORY:                 return UV_ENOMEM;
-    case ERROR_CANNOT_MAKE:                 return UV_ENOSPC;
-    case ERROR_DISK_FULL:                   return UV_ENOSPC;
-    case ERROR_EA_TABLE_FULL:               return UV_ENOSPC;
-    case ERROR_END_OF_MEDIA:                return UV_ENOSPC;
-    case ERROR_HANDLE_DISK_FULL:            return UV_ENOSPC;
-    case ERROR_NOT_CONNECTED:               return UV_ENOTCONN;
-    case WSAENOTCONN:                       return UV_ENOTCONN;
-    case ERROR_DIR_NOT_EMPTY:               return UV_ENOTEMPTY;
-    case WSAENOTSOCK:                       return UV_ENOTSOCK;
-    case ERROR_NOT_SUPPORTED:               return UV_ENOTSUP;
-    case ERROR_BROKEN_PIPE:                 return UV_EOF;
-    case ERROR_ACCESS_DENIED:               return UV_EPERM;
-    case ERROR_PRIVILEGE_NOT_HELD:          return UV_EPERM;
-    case ERROR_BAD_PIPE:                    return UV_EPIPE;
-    case ERROR_NO_DATA:                     return UV_EPIPE;
-    case ERROR_PIPE_NOT_CONNECTED:          return UV_EPIPE;
-    case WSAESHUTDOWN:                      return UV_EPIPE;
-    case WSAEPROTONOSUPPORT:                return UV_EPROTONOSUPPORT;
-    case ERROR_WRITE_PROTECT:               return UV_EROFS;
-    case ERROR_SEM_TIMEOUT:                 return UV_ETIMEDOUT;
-    case WSAETIMEDOUT:                      return UV_ETIMEDOUT;
-    case ERROR_NOT_SAME_DEVICE:             return UV_EXDEV;
-    case ERROR_INVALID_FUNCTION:            return UV_EISDIR;
-    case ERROR_META_EXPANSION_TOO_LONG:     return UV_E2BIG;
-    default:                                return UV_UNKNOWN;
-  }
-#else
-  const int error = -errno;
-  STATIC_ASSERT(-EINTR == UV_EINTR, "Need to translate error codes");
-  STATIC_ASSERT(-EAGAIN == UV_EAGAIN, "Need to translate error codes");
-  STATIC_ASSERT(-ENOMEM == UV_ENOMEM, "Need to translate error codes");
-  return error;
-#endif
-}

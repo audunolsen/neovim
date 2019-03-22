@@ -6,7 +6,7 @@ local eval, feed_command, source = helpers.eval, helpers.feed_command, helpers.s
 local eq, neq = helpers.eq, helpers.neq
 local write_file = helpers.write_file
 
-describe('terminal buffer', function()
+describe(':terminal buffer', function()
   local screen
 
   before_each(function()
@@ -207,18 +207,18 @@ describe('terminal buffer', function()
       feed_command('terminal')
       feed('<c-\\><c-n>')
       feed_command('confirm bdelete')
-      screen:expect('Close "term://', nil, true, nil, true)
+      screen:expect{any='Close "term://', attr_ignore=true}
     end)
 
     it('with &confirm', function()
       feed_command('terminal')
       feed('<c-\\><c-n>')
       feed_command('bdelete')
-      screen:expect('E89', nil, true, nil, true)
+      screen:expect{any='E89', attr_ignore=true}
       feed('<cr>')
       eq('terminal', eval('&buftype'))
       feed_command('set confirm | bdelete')
-      screen:expect('Close "term://', nil, true, nil, true)
+      screen:expect{any='Close "term://', attr_ignore=true}
       feed('y')
       neq('terminal', eval('&buftype'))
     end)
@@ -242,7 +242,7 @@ describe('No heap-buffer-overflow when using', function()
     feed('$')
     -- Let termopen() modify the buffer
     feed_command('call termopen("echo")')
-    wait()
+    eq(2, eval('1+1')) -- check nvim still running
     feed_command('bdelete!')
   end)
 end)

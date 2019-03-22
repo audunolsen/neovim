@@ -155,6 +155,8 @@ enum {
   EXPAND_USER_ADDR_TYPE,
   EXPAND_PACKADD,
   EXPAND_MESSAGES,
+  EXPAND_MAPCLEAR,
+  EXPAND_ARGLIST,
   EXPAND_CHECKHEALTH,
 };
 
@@ -207,7 +209,7 @@ enum { FOLD_TEXT_LEN = 51 };  //!< buffer size for get_foldtext()
 
 
 // defines to avoid typecasts from (char_u *) to (char *) and back
-// (vim_strchr() and vim_strrchr() are now in alloc.c)
+// (vim_strchr() is now in strings.c)
 
 #define STRLEN(s)           strlen((char *)(s))
 #define STRCPY(d, s)        strcpy((char *)(d), (char *)(s))
@@ -237,6 +239,8 @@ enum { FOLD_TEXT_LEN = 51 };  //!< buffer size for get_foldtext()
 #  define STRNICMP(d, s, n) vim_strnicmp((char *)(d), (char *)(s), (size_t)(n))
 # endif
 #endif
+
+#define STRRCHR(s, c)       (char_u *)strrchr((const char *)(s), (c))
 
 #define STRCAT(d, s)        strcat((char *)(d), (char *)(s))
 #define STRNCAT(d, s, n)    strncat((char *)(d), (char *)(s), (size_t)(n))

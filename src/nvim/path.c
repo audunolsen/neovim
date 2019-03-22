@@ -1267,7 +1267,7 @@ int gen_expand_wildcards(int num_pat, char_u **pat, int *num_file,
   }
 
   *num_file = ga.ga_len;
-  *file = (ga.ga_data != NULL) ? (char_u **)ga.ga_data : (char_u **)"";
+  *file = (ga.ga_data != NULL) ? (char_u **)ga.ga_data : NULL;
 
   recursive = false;
 
@@ -1770,7 +1770,7 @@ void path_fix_case(char_u *name)
   }
 
   // Open the directory where the file is located.
-  char_u *slash = vim_strrchr(name, '/');
+  char_u *slash = STRRCHR(name, '/');
   char_u *tail;
   Directory dir;
   bool ok;
@@ -1819,7 +1819,7 @@ void path_fix_case(char_u *name)
 int after_pathsep(const char *b, const char *p)
 {
   return p > b && vim_ispathsep(p[-1])
-         && (!has_mbyte || (*mb_head_off)((char_u *)b, (char_u *)p - 1) == 0);
+         && utf_head_off((char_u *)b, (char_u *)p - 1) == 0;
 }
 
 /*
@@ -2038,12 +2038,12 @@ int expand_wildcards(int num_pat, char_u **pat, int *num_files, char_u ***files,
   if (*p_wig) {
     char_u  *ffname;
 
-    // check all filess in (*files)[]
+    // check all files in (*files)[]
+    assert(*num_files == 0 || *files != NULL);
     for (i = 0; i < *num_files; i++) {
       ffname = (char_u *)FullName_save((char *)(*files)[i], false);
-      if (ffname == NULL) {               // out of memory
-        break;
-      }
+      assert((*files)[i] != NULL);
+      assert(ffname != NULL);
       if (match_file_list(p_wig, (*files)[i], ffname)) {
         // remove this matching file from the list
         xfree((*files)[i]);
@@ -2057,16 +2057,16 @@ int expand_wildcards(int num_pat, char_u **pat, int *num_files, char_u ***files,
     }
   }
 
-  /*
-   * Move the names where 'suffixes' match to the end.
-   */
+  //
+  // Move the names where 'suffixes' match to the end.
+  //
+  assert(*num_files == 0 || *files != NULL);
   if (*num_files > 1) {
     non_suf_match = 0;
     for (i = 0; i < *num_files; i++) {
       if (!match_suffix((*files)[i])) {
         //
-        // Move the name without matching suffix to the front
-        // of the list.
+        // Move the name without matching suffix to the front of the list.
         //
         p = (*files)[i];
         for (j = i; j > non_suf_match; j--) {
@@ -2213,10 +2213,10 @@ static int path_to_absolute(const char_u *fname, char_u *buf, size_t len,
 
   // expand it if forced or not an absolute path
   if (force || !path_is_absolute(fname)) {
-    p = vim_strrchr(fname, '/');
+    p = STRRCHR(fname, '/');
 #ifdef WIN32
     if (p == NULL) {
-      p = vim_strrchr(fname, '\\');
+      p = STRRCHR(fname, '\\');
     }
 #endif
     if (p != NULL) {
@@ -2271,7 +2271,7 @@ int path_is_absolute(const char_u *fname)
 void path_guess_exepath(const char *argv0, char *buf, size_t bufsize)
   FUNC_ATTR_NONNULL_ALL
 {
-  char *path = getenv("PATH");
+  const char *path = os_getenv("PATH");
 
   if (path == NULL || path_is_absolute((char_u *)argv0)) {
     xstrlcpy(buf, argv0, bufsize);

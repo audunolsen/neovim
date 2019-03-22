@@ -64,6 +64,12 @@ getkey:
       may_sync_undo();
     }
 
+#if MIN_LOG_LEVEL <= DEBUG_LOG_LEVEL
+    char *keyname = key == K_EVENT
+                    ? "K_EVENT" : (char *)get_special_key_name(key, mod_mask);
+    DLOG("input: %s", keyname);
+#endif
+
     int execute_result = s->execute(s, key);
     if (!execute_result) {
       break;
@@ -73,13 +79,13 @@ getkey:
   }
 }
 
-/// Return TRUE if in the current mode we need to use virtual.
-int virtual_active(void)
+/// Return true if in the current mode we need to use virtual.
+bool virtual_active(void)
 {
   // While an operator is being executed we return "virtual_op", because
   // VIsual_active has already been reset, thus we can't check for "block"
   // being used.
-  if (virtual_op != MAYBE) {
+  if (virtual_op != kNone) {
     return virtual_op;
   }
   return ve_flags == VE_ALL
@@ -107,7 +113,7 @@ int get_real_state(void)
 /// @returns[allocated] mode string
 char *get_mode(void)
 {
-  char *buf = xcalloc(3, sizeof(char));
+  char *buf = xcalloc(4, sizeof(char));
 
   if (VIsual_active) {
     if (VIsual_select) {
@@ -154,6 +160,12 @@ char *get_mode(void)
     buf[0] = 'n';
     if (finish_op) {
       buf[1] = 'o';
+      // to be able to detect force-linewise/blockwise/characterwise operations
+      buf[2] = (char)motion_force;
+    } else if (restart_edit == 'I' || restart_edit == 'R'
+               || restart_edit == 'V') {
+      buf[1] = 'i';
+      buf[2] = (char)restart_edit;
     }
   }
 

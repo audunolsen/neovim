@@ -85,14 +85,15 @@ get_vim_sources() {
     git clone https://github.com/vim/vim.git "${VIM_SOURCE_DIR}"
     cd "${VIM_SOURCE_DIR}"
   else
-    if [[ ! -d "${VIM_SOURCE_DIR}/.git" ]]; then
+    cd "${VIM_SOURCE_DIR}"
+    if ! [ -d ".git" ] \
+        && ! [ "$(git rev-parse --show-toplevel)" = "${VIM_SOURCE_DIR}" ]; then
       msg_err "${VIM_SOURCE_DIR} does not appear to be a git repository."
       echo "  Please remove it and try again."
       exit 1
     fi
-    cd "${VIM_SOURCE_DIR}"
     echo "Updating Vim sources: ${VIM_SOURCE_DIR}"
-    git pull &&
+    git pull --ff &&
       msg_ok "Updated Vim sources." ||
       msg_err "Could not update Vim sources; ignoring error."
   fi
@@ -131,7 +132,7 @@ assign_commit_details() {
   vim_commit_url="https://github.com/vim/vim/commit/${vim_commit}"
   vim_message="$(cd "${VIM_SOURCE_DIR}" \
     && git log -1 --pretty='format:%B' "${vim_commit}" \
-      | sed -e 's/\(#[0-9]*\)/vim\/vim\1/g')"
+      | sed -e 's/\(#[0-9]\{1,\}\)/vim\/vim\1/g')"
   if [[ ${munge_commit_line} == "true" ]]; then
     # Remove first line of commit message.
     vim_message="$(echo "${vim_message}" | sed -e '1s/^patch /vim-patch:/')"
@@ -148,15 +149,15 @@ preprocess_patch() {
   local na_src='proto\|Make*\|gui_*\|if_lua\|if_mzsch\|if_olepp\|if_ole\|if_perl\|if_py\|if_ruby\|if_tcl\|if_xcmdsrv'
   2>/dev/null $nvim --cmd 'set dir=/tmp' +'g@^diff --git a/src/\S*\<\%(testdir/\)\@<!\%('${na_src}'\)@norm! d/\v(^diff)|%$' +w +q "$file"
 
-  # Remove channel.txt, netbeans.txt, os_*.txt, term.txt, todo.txt, version*.txt, tags
-  local na_doc='channel\.txt\|netbeans\.txt\|os_\w\+\.txt\|term\.txt\|todo\.txt\|version\d\.txt\|tags'
+  # Remove unwanted Vim doc files.
+  local na_doc='channel\.txt\|netbeans\.txt\|os_\w\+\.txt\|term\.txt\|todo\.txt\|version\d\.txt\|sponsor\.txt\|intro\.txt\|tags'
   2>/dev/null $nvim --cmd 'set dir=/tmp' +'g@^diff --git a/runtime/doc/\<\%('${na_doc}'\)\>@norm! d/\v(^diff)|%$' +w +q "$file"
 
   # Remove "Last change ..." changes in doc files.
   2>/dev/null $nvim --cmd 'set dir=/tmp' +'%s/^@@.*\n.*For Vim version.*Last change.*\n.*For Vim version.*Last change.*//' +w +q "$file"
 
-  # Remove some testdir/Make_*.mak files
-  local na_src_testdir='Make_amiga.mak\|Make_dos.mak\|Make_ming.mak\|Make_vms.mms'
+  # Remove screen dumps, testdir/Make_*.mak files
+  local na_src_testdir='Make_amiga.mak\|Make_dos.mak\|Make_ming.mak\|Make_vms.mms\|dumps/.*.dump'
   2>/dev/null $nvim --cmd 'set dir=/tmp' +'g@^diff --git a/src/testdir/\<\%('${na_src_testdir}'\)\>@norm! d/\v(^diff)|%$' +w +q "$file"
 
   # Remove version.c #7555
@@ -177,6 +178,16 @@ preprocess_patch() {
 
   # Rename path to matchit plugin.
   LC_ALL=C sed -e 's@\( [ab]/runtime\)/pack/dist/opt/matchit/\(plugin/matchit.vim\)@\1/\2@g' \
+    "$file" > "$file".tmp && mv "$file".tmp "$file"
+  LC_ALL=C sed -e 's@\( [ab]/runtime\)/pack/dist/opt/matchit/doc/\(matchit.txt\)@\1/doc/pi_\2@g' \
+    "$file" > "$file".tmp && mv "$file".tmp "$file"
+
+  # Rename test_urls.vim to check_urls.vim
+  LC_ALL=C sed -e 's@\( [ab]\)/runtime/doc/test\(_urls.vim\)@\1/scripts/check\2@g' \
+    "$file" > "$file".tmp && mv "$file".tmp "$file"
+
+  # Rename path to check_colors.vim
+  LC_ALL=C sed -e 's@\( [ab]/runtime\)/colors/\(tools/check_colors.vim\)@\1/\2@g' \
     "$file" > "$file".tmp && mv "$file".tmp "$file"
 }
 
@@ -202,7 +213,7 @@ get_vimpatch() {
   printf "Pre-processing patch...\n"
   preprocess_patch "${NVIM_SOURCE_DIR}/${patch_file}"
 
-  msg_ok "Saved patch to '${NVIM_SOURCE_DIR}/${patch_file}'.\n"
+  msg_ok "Saved patch to '${NVIM_SOURCE_DIR}/${patch_file}'."
 }
 
 stage_patch() {
@@ -244,7 +255,7 @@ stage_patch() {
     else
       printf "\nApplying patch...\n"
       patch -p1 < "${patch_file}" || true
-      find -name '*.orig' -type f -delete
+      find . -name '*.orig' -type f -delete
     fi
     printf "\nInstructions:\n  Proceed to port the patch.\n"
   else
@@ -286,6 +297,7 @@ submit_pr() {
     submit_fn="git_hub_pr"
   else
     >&2 echo "${BASENAME}: 'hub' or 'git-hub' not found in PATH or not executable."
+    >&2 echo "              Get it here: https://hub.github.com/"
     exit 1
   fi
 

@@ -49,6 +49,7 @@
 #include "nvim/buffer.h"
 #include "nvim/cursor.h"
 #include "nvim/eval.h"
+#include "nvim/getchar.h"
 #include "nvim/fileio.h"
 #include "nvim/func_attr.h"
 #include "nvim/main.h"
@@ -276,6 +277,9 @@ int ml_open(buf_T *buf)
 
   // Open the memfile.  No swap file is created yet.
   memfile_T *mfp = mf_open(NULL, 0);
+  if (mfp == NULL) {
+    goto error;
+  }
 
   buf->b_ml.ml_mfp = mfp;
   buf->b_ml.ml_flags = ML_EMPTY;
@@ -359,10 +363,12 @@ int ml_open(buf_T *buf)
   return OK;
 
 error:
-  if (hp) {
-    mf_put(mfp, hp, false, false);
+  if (mfp != NULL) {
+    if (hp) {
+      mf_put(mfp, hp, false, false);
+    }
+    mf_close(mfp, true);  // will also xfree(mfp->mf_fname)
   }
-  mf_close(mfp, true);  // will also xfree(mfp->mf_fname)
   buf->b_ml.ml_mfp = NULL;
   return FAIL;
 }
@@ -528,17 +534,20 @@ void ml_open_file(buf_T *buf)
   buf->b_may_swap = false;
 }
 
-/*
- * If still need to create a swap file, and starting to edit a not-readonly
- * file, or reading into an existing buffer, create a swap file now.
- */
-void 
-check_need_swap (
-    int newfile                    /* reading file into new buffer */
-)
+/// If still need to create a swap file, and starting to edit a not-readonly
+/// file, or reading into an existing buffer, create a swap file now.
+///
+/// @param newfile reading file into new buffer
+void check_need_swap(int newfile)
 {
-  if (curbuf->b_may_swap && (!curbuf->b_p_ro || !newfile))
+  int old_msg_silent = msg_silent;  // might be reset by an E325 message
+  msg_silent = 0;  // If swap dialog prompts for input, user needs to see it!
+
+  if (curbuf->b_may_swap && (!curbuf->b_p_ro || !newfile)) {
     ml_open_file(curbuf);
+  }
+
+  msg_silent = old_msg_silent;
 }
 
 /*
@@ -769,17 +778,16 @@ void ml_recover(void)
   called_from_main = (curbuf->b_ml.ml_mfp == NULL);
   attr = HL_ATTR(HLF_E);
 
-  /*
-   * If the file name ends in ".s[uvw][a-z]" we assume this is the swap file.
-   * Otherwise a search is done to find the swap file(s).
-   */
+  // If the file name ends in ".s[a-w][a-z]" we assume this is the swap file.
+  // Otherwise a search is done to find the swap file(s).
   fname = curbuf->b_fname;
   if (fname == NULL)                /* When there is no file name */
     fname = (char_u *)"";
   len = (int)STRLEN(fname);
   if (len >= 4
       && STRNICMP(fname + len - 4, ".s", 2) == 0
-      && vim_strchr((char_u *)"UVWuvw", fname[len - 2]) != NULL
+      && vim_strchr((char_u *)"abcdefghijklmnopqrstuvw",
+                    TOLOWER_ASC(fname[len - 2])) != NULL
       && ASCII_ISALPHA(fname[len - 1])) {
     directly = TRUE;
     fname_used = vim_strsave(fname);     /* make a copy for mf_open() */
@@ -836,7 +844,7 @@ void ml_recover(void)
                                     mf_open() will consume "fname_used"! */
   mfp = mf_open(fname_used, O_RDONLY);
   fname_used = p;
-  if (mfp->mf_fd < 0) {
+  if (mfp == NULL || mfp->mf_fd < 0) {
     EMSG2(_("E306: Cannot open %s"), fname_used);
     goto theend;
   }
@@ -1446,7 +1454,7 @@ static char *make_percent_swname(const char *dir, char *name)
 }
 
 #ifdef UNIX
-static int process_still_running;
+static bool process_still_running;
 #endif
 
 /*
@@ -1524,8 +1532,8 @@ static time_t swapfile_info(char_u *fname)
           msg_outnum(char_to_long(b0.b0_pid));
 #if defined(UNIX)
           if (kill((pid_t)char_to_long(b0.b0_pid), 0) == 0) {
-            MSG_PUTS(_(" (still running)"));
-            process_still_running = TRUE;
+            MSG_PUTS(_(" (STILL RUNNING)"));
+            process_still_running = true;
           }
 #endif
         }
@@ -2378,7 +2386,7 @@ static int ml_delete_int(buf_T *buf, linenr_T lnum, int message)
         )
       set_keep_msg((char_u *)_(no_lines_msg), 0);
 
-    i = ml_replace((linenr_T)1, (char_u *)"", TRUE);
+    i = ml_replace((linenr_T)1, (char_u *)"", true);
     buf->b_ml.ml_flags |= ML_EMPTY;
 
     return i;
@@ -3147,7 +3155,9 @@ attention_message (
   msg_outtrans(buf->b_fname);
   MSG_PUTS("\"\n");
   FileInfo file_info;
-  if (os_fileinfo((char *)buf->b_fname, &file_info)) {
+  if (!os_fileinfo((char *)buf->b_fname, &file_info)) {
+    MSG_PUTS(_("      CANNOT BE FOUND"));
+  } else {
     MSG_PUTS(_("             dated: "));
     x = file_info.stat.st_mtim.tv_sec;
     p = ctime(&x);  // includes '\n'
@@ -3344,7 +3354,7 @@ static char *findswapname(buf_T *buf, char **dirp, char *old_fname,
           int choice = 0;
 
 #ifdef UNIX
-          process_still_running = FALSE;
+          process_still_running = false;
 #endif
           /*
            * If there is a SwapExists autocommand and we can handle
@@ -3356,12 +3366,16 @@ static char *findswapname(buf_T *buf, char **dirp, char *old_fname,
             choice = do_swapexists(buf, (char_u *) fname);
 
           if (choice == 0) {
-            /* Show info about the existing swap file. */
-            attention_message(buf, (char_u *) fname);
+            // Show info about the existing swap file.
+            attention_message(buf, (char_u *)fname);
 
-            /* We don't want a 'q' typed at the more-prompt
-             * interrupt loading a file. */
-            got_int = FALSE;
+            // We don't want a 'q' typed at the more-prompt
+            // interrupt loading a file.
+            got_int = false;
+
+            // If vimrc has "simalt ~x" we don't want it to
+            // interfere with the prompt here.
+            flush_buffers(FLUSH_TYPEAHEAD);
           }
 
           if (swap_exists_action != SEA_NONE && choice == 0) {
@@ -3398,7 +3412,9 @@ static char *findswapname(buf_T *buf, char **dirp, char *old_fname,
 # endif
             xfree(name);
 
-            /* pretend screen didn't scroll, need redraw anyway */
+            // pretend screen didn't scroll, need redraw anyway
+            // TODO(bfredl): when doing the message grid refactor,
+            // simplify this special case.
             msg_scrolled = 0;
             redraw_all_later(NOT_VALID);
           }
@@ -3525,17 +3541,16 @@ static int b0_magic_wrong(ZERO_BL *b0p)
  *		== 0   == 0	OK	FAIL	TRUE
  *
  * current file doesn't exist, inode for swap unknown, both file names not
- * available -> probably same file
- *		== 0   == 0    FAIL	FAIL	FALSE
+ * available -> compare file names
+ *		== 0   == 0    FAIL	FAIL	fname_c != fname_s
  *
  * Only the last 32 bits of the inode will be used. This can't be changed
  * without making the block 0 incompatible with 32 bit versions.
  */
 
-static int
-fnamecmp_ino (
-    char_u *fname_c,               /* current file name */
-    char_u *fname_s,               /* file name from swap file */
+static bool fnamecmp_ino(
+    char_u *fname_c,              // current file name
+    char_u *fname_s,              // file name from swap file
     long ino_block0
 )
 {
@@ -3576,11 +3591,13 @@ fnamecmp_ino (
 
   /*
    * Can't compare inodes or file names, guess that the files are different,
-   * unless both appear not to exist at all.
+   * unless both appear not to exist at all, then compare with the file name
+   * in the swap file.
    */
-  if (ino_s == 0 && ino_c == 0 && retval_c == FAIL && retval_s == FAIL)
-    return FALSE;
-  return TRUE;
+  if (ino_s == 0 && ino_c == 0 && retval_c == FAIL && retval_s == FAIL) {
+    return STRCMP(fname_c, fname_s) != 0;
+  }
+  return true;
 }
 
 /*
@@ -3699,9 +3716,9 @@ static void ml_updatechunk(buf_T *buf, linenr_T line, long len, int updtype)
          curix++) {
       curline += buf->b_ml.ml_chunksize[curix].mlcs_numlines;
     }
-  } else if (line >= curline + buf->b_ml.ml_chunksize[curix].mlcs_numlines
-             && curix < buf->b_ml.ml_usedchunks - 1) {
-    /* Adjust cached curix & curline */
+  } else if (curix < buf->b_ml.ml_usedchunks - 1
+             && line >= curline + buf->b_ml.ml_chunksize[curix].mlcs_numlines) {
+    // Adjust cached curix & curline
     curline += buf->b_ml.ml_chunksize[curix].mlcs_numlines;
     curix++;
   }
@@ -3840,13 +3857,17 @@ static void ml_updatechunk(buf_T *buf, linenr_T line, long len, int updtype)
   ml_upd_lastcurix = curix;
 }
 
-/*
- * Find offset for line or line with offset.
- * Find line with offset if "lnum" is 0; return remaining offset in offp
- * Find offset of line if "lnum" > 0
- * return -1 if information is not available
- */
-long ml_find_line_or_offset(buf_T *buf, linenr_T lnum, long *offp)
+/// Find offset for line or line with offset.
+///
+/// @param buf buffer to use
+/// @param lnum if > 0, find offset of lnum, store offset in offp
+///             if == 0, return line with offset *offp
+/// @param offp Location where offset of line is stored, or to read offset to
+///             use to find line. In the later case, store remaining offset.
+/// @param no_ff ignore 'fileformat' option, always use one byte for NL.
+///
+/// @return -1 if information is not available
+long ml_find_line_or_offset(buf_T *buf, linenr_T lnum, long *offp, bool no_ff)
 {
   linenr_T curline;
   int curix;
@@ -3859,7 +3880,7 @@ long ml_find_line_or_offset(buf_T *buf, linenr_T lnum, long *offp)
   int text_end;
   long offset;
   int len;
-  int ffdos = (get_fileformat(buf) == EOL_DOS);
+  int ffdos = !no_ff && (get_fileformat(buf) == EOL_DOS);
   int extra = 0;
 
   /* take care of cached line first */
@@ -3954,7 +3975,7 @@ long ml_find_line_or_offset(buf_T *buf, linenr_T lnum, long *offp)
     /* Don't count the last line break if 'noeol' and ('bin' or
      * 'nofixeol'). */
     if ((!buf->b_p_fixeol || buf->b_p_bin) && !buf->b_p_eol
-        && buf->b_ml.ml_line_count == lnum) {
+        && lnum > buf->b_ml.ml_line_count) {
       size -= ffdos + 1;
     }
   }
@@ -3973,7 +3994,7 @@ void goto_byte(long cnt)
   if (boff) {
     boff--;
   }
-  lnum = ml_find_line_or_offset(curbuf, (linenr_T)0, &boff);
+  lnum = ml_find_line_or_offset(curbuf, (linenr_T)0, &boff, false);
   if (lnum < 1) {         // past the end
     curwin->w_cursor.lnum = curbuf->b_ml.ml_line_count;
     curwin->w_curswant = MAXCOL;
@@ -3999,18 +4020,15 @@ void goto_byte(long cnt)
 /// Return 0 otherwise.
 int inc(pos_T *lp)
 {
-  char_u  *p = ml_get_pos(lp);
-
-  if (*p != NUL) {      // still within line, move to next char (may be NUL)
-    if (has_mbyte) {
-      int l = (*mb_ptr2len)(p);
+  // when searching position may be set to end of a line
+  if (lp->col != MAXCOL) {
+    const char_u *const p = ml_get_pos(lp);
+    if (*p != NUL) {  // still within line, move to next char (may be NUL)
+      const int l = utfc_ptr2len(p);
 
       lp->col += l;
-      return (p[l] != NUL) ? 0 : 2;
+      return ((p[l] != NUL) ? 0 : 2);
     }
-    lp->col++;
-    lp->coladd = 0;
-    return (p[1] != NUL) ? 0 : 2;
   }
   if (lp->lnum != curbuf->b_ml.ml_line_count) {     // there is a next line
     lp->col = 0;
@@ -4034,27 +4052,33 @@ int incl(pos_T *lp)
 
 int dec(pos_T *lp)
 {
-  char_u      *p;
-
   lp->coladd = 0;
-  if (lp->col > 0) {            // still within line
-    lp->col--;
-    if (has_mbyte) {
-      p = ml_get(lp->lnum);
-      lp->col -= (*mb_head_off)(p, p + lp->col);
-    }
+  if (lp->col == MAXCOL) {
+    // past end of line
+    char_u *p = ml_get(lp->lnum);
+    lp->col = (colnr_T)STRLEN(p);
+    lp->col -= utf_head_off(p, p + lp->col);
     return 0;
   }
-  if (lp->lnum > 1) {           // there is a prior line
+
+  if (lp->col > 0) {
+    // still within line
+    lp->col--;
+    char_u *p = ml_get(lp->lnum);
+    lp->col -= utf_head_off(p, p + lp->col);
+    return 0;
+  }
+  if (lp->lnum > 1) {
+    // there is a prior line
     lp->lnum--;
-    p = ml_get(lp->lnum);
+    char_u *p = ml_get(lp->lnum);
     lp->col = (colnr_T)STRLEN(p);
-    if (has_mbyte) {
-      lp->col -= (*mb_head_off)(p, p + lp->col);
-    }
+    lp->col -= utf_head_off(p, p + lp->col);
     return 1;
   }
-  return -1;                    // at start of file
+
+  // at start of file
+  return -1;
 }
 
 /// Same as dec(), but skip NUL at the end of non-empty lines.

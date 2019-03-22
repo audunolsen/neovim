@@ -4,6 +4,14 @@ function! s:check_config() abort
   let ok = v:true
   call health#report_start('Configuration')
 
+  let vimrc = empty($MYVIMRC) ? stdpath('config').'/init.vim' : $MYVIMRC
+  if !filereadable(vimrc)
+    let ok = v:false
+    let has_vim = filereadable(expand('~/.vimrc'))
+    call health#report_warn('Missing user config file: '.vimrc,
+          \[ has_vim ? ':help nvim-from-vim' : ':help init.vim' ])
+  endif
+
   " If $VIM is empty we don't care. Else make sure it is valid.
   if !empty($VIM) && !filereadable($VIM.'/runtime/doc/nvim.txt')
     let ok = v:false
@@ -15,6 +23,15 @@ function! s:check_config() abort
     call health#report_warn('$NVIM_TUI_ENABLE_CURSOR_SHAPE is ignored in Nvim 0.2+',
           \ [ "Use the 'guicursor' option to configure cursor shape. :help 'guicursor'",
           \   'https://github.com/neovim/neovim/wiki/Following-HEAD#20170402' ])
+  endif
+
+  if v:ctype ==# 'C'
+    let ok = v:false
+    call health#report_error('Locale does not support UTF-8. Unicode characters may not display correctly.'
+          \                  .printf("\n$LANG=%s $LC_ALL=%s $LC_CTYPE=%s", $LANG, $LC_ALL, $LC_CTYPE),
+          \ [ 'If using tmux, try the -u option.',
+          \   'Ensure that your terminal/shell/tmux/etc inherits the environment, or set $LANG explicitly.' ,
+          \   'Configure your system locale.' ])
   endif
 
   if &paste

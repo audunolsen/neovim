@@ -137,6 +137,11 @@ func Test_getcompletion()
   let l = getcompletion('v:notexists', 'var')
   call assert_equal([], l)
 
+  args a.c b.c
+  let l = getcompletion('', 'arglist')
+  call assert_equal(['a.c', 'b.c'], l)
+  %argdelete
+
   let l = getcompletion('', 'augroup')
   call assert_true(index(l, 'END') >= 0)
   let l = getcompletion('blahblah', 'augroup')
@@ -220,6 +225,11 @@ func Test_getcompletion()
   let l = getcompletion('', 'messages')
   call assert_true(index(l, 'clear') >= 0)
   let l = getcompletion('not', 'messages')
+  call assert_equal([], l)
+
+  let l = getcompletion('', 'mapclear')
+  call assert_true(index(l, '<buffer>') >= 0)
+  let l = getcompletion('not', 'mapclear')
   call assert_equal([], l)
 
   if has('cscope')
@@ -311,6 +321,9 @@ func Test_paste_in_cmdline()
   call feedkeys("ft:aaa \<C-R>\<C-F> bbb\<C-B>\"\<CR>", 'tx')
   call assert_equal('"aaa /tmp/some bbb', @:)
 
+  call feedkeys(":aaa \<C-R>\<C-L> bbb\<C-B>\"\<CR>", 'tx')
+  call assert_equal('"aaa '.getline(1).' bbb', @:)
+
   set incsearch
   call feedkeys("fy:aaa veryl\<C-R>\<C-W> bbb\<C-B>\"\<CR>", 'tx')
   call assert_equal('"aaa verylongword bbb', @:)
@@ -320,6 +333,17 @@ func Test_paste_in_cmdline()
 
   call feedkeys(":\<C-\>etoupper(getline(1))\<CR>\<C-B>\"\<CR>", 'tx')
   call assert_equal('"ASDF.X /TMP/SOME VERYLONGWORD A;B-C*D ', @:)
+  bwipe!
+
+  " Error while typing a command used to cause that it was not executed
+  " in the end.
+  new
+  try
+    call feedkeys(":file \<C-R>%Xtestfile\<CR>", 'tx')
+  catch /^Vim\%((\a\+)\)\=:E32/
+    " ignore error E32
+  endtry
+  call assert_equal("Xtestfile", bufname("%"))
   bwipe!
 endfunc
 
@@ -373,6 +397,27 @@ func Test_cmdline_complete_user_cmd()
   call feedkeys(":Foo b\<Tab>\<Home>\"\<cr>", 'tx')
   call assert_equal('"Foo blue', @:)
   delcommand Foo
+endfunc
+
+func Test_cmdline_write_alternatefile()
+  new
+  call setline('.', ['one', 'two'])
+  f foo.txt
+  new
+  f #-A
+  call assert_equal('foo.txt-A', expand('%'))
+  f #<-B.txt
+  call assert_equal('foo-B.txt', expand('%'))
+  f %<
+  call assert_equal('foo-B', expand('%'))
+  new
+  call assert_fails('f #<', 'E95')
+  bw!
+  f foo-B.txt
+  f %<-A
+  call assert_equal('foo-B-A', expand('%'))
+  bw!
+  bw!
 endfunc
 
 " using a leading backslash here
@@ -430,6 +475,22 @@ func Test_getcmdtype()
   cunmap <F6>
 endfunc
 
+func Test_getcmdwintype()
+  call feedkeys("q/:let a = getcmdwintype()\<CR>:q\<CR>", 'x!')
+  call assert_equal('/', a)
+
+  call feedkeys("q?:let a = getcmdwintype()\<CR>:q\<CR>", 'x!')
+  call assert_equal('?', a)
+
+  call feedkeys("q::let a = getcmdwintype()\<CR>:q\<CR>", 'x!')
+  call assert_equal(':', a)
+
+  call feedkeys(":\<C-F>:let a = getcmdwintype()\<CR>:q\<CR>", 'x!')
+  call assert_equal(':', a)
+
+  call assert_equal('', getcmdwintype())
+endfunc
+
 func Test_verbosefile()
   set verbosefile=Xlog
   echomsg 'foo'
@@ -438,6 +499,56 @@ func Test_verbosefile()
   let log = readfile('Xlog')
   call assert_match("foo\nbar", join(log, "\n"))
   call delete('Xlog')
+endfunc
+
+func Test_setcmdpos()
+  func InsertTextAtPos(text, pos)
+    call assert_equal(0, setcmdpos(a:pos))
+    return a:text
+  endfunc
+
+  " setcmdpos() with position in the middle of the command line.
+  call feedkeys(":\"12\<C-R>=InsertTextAtPos('a', 3)\<CR>b\<CR>", 'xt')
+  call assert_equal('"1ab2', @:)
+
+  call feedkeys(":\"12\<C-R>\<C-R>=InsertTextAtPos('a', 3)\<CR>b\<CR>", 'xt')
+  call assert_equal('"1b2a', @:)
+
+  " setcmdpos() with position beyond the end of the command line.
+  call feedkeys(":\"12\<C-B>\<C-R>=InsertTextAtPos('a', 10)\<CR>b\<CR>", 'xt')
+  call assert_equal('"12ab', @:)
+
+  " setcmdpos() returns 1 when not editing the command line.
+  call assert_equal(1, setcmdpos(3))
+endfunc
+
+func Test_cmdline_overstrike()
+  let encodings = has('multi_byte') ? [ 'utf8' ] : [ 'latin1' ]
+  let encoding_save = &encoding
+
+  for e in encodings
+    exe 'set encoding=' . e
+
+    " Test overstrike in the middle of the command line.
+    call feedkeys(":\"01234\<home>\<right>\<right>ab\<right>\<insert>cd\<enter>", 'xt')
+    call assert_equal('"0ab1cd4', @:)
+
+    " Test overstrike going beyond end of command line.
+    call feedkeys(":\"01234\<home>\<right>\<right>ab\<right>\<insert>cdefgh\<enter>", 'xt')
+    call assert_equal('"0ab1cdefgh', @:)
+
+    " Test toggling insert/overstrike a few times.
+    call feedkeys(":\"01234\<home>\<right>ab\<right>\<insert>cd\<right>\<insert>ef\<enter>", 'xt')
+    call assert_equal('"ab0cd3ef4', @:)
+  endfor
+
+  if has('multi_byte')
+    " Test overstrike with multi-byte characters.
+    call feedkeys(":\"テキストエディタ\<home>\<right>\<right>ab\<right>\<insert>cd\<enter>", 'xt')
+    call assert_equal('"テabキcdエディタ', @:)
+  endif
+
+  let &encoding = encoding_save
 endfunc
 
 set cpo&

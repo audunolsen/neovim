@@ -7,7 +7,7 @@ _stat() {
 }
 
 top_make() {
-  echo '================================================================================'
+  printf '%78s\n' | tr ' ' '='
   # Travis has 1.5 virtual cores according to:
   # http://docs.travis-ci.com/user/speeding-up-the-build/#Paralellizing-your-build-on-one-VM
   ninja "$@"
@@ -35,7 +35,7 @@ build_deps() {
   elif test -f "${CACHE_MARKER}" ; then
     echo "Using third-party dependencies from Travis cache (last update: $(_stat "${CACHE_MARKER}"))."
     cp -r "${HOME}/.cache/nvim-deps"/. "${DEPS_BUILD_DIR}"
-    cp -r "${HOME}/.cache/nvim-deps-downloads" "${DEPS_DOWNLOAD_DIR}"
+    cp -r "${HOME}/.cache/nvim-deps-downloads"/. "${DEPS_DOWNLOAD_DIR}"
   fi
 
   # Even if we're using cached dependencies, run CMake and make to

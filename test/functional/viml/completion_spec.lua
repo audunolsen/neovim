@@ -466,6 +466,7 @@ describe('completion', function()
       ]])
       expect('August')
     end)
+
     it("repeats correctly after backspace #2674", function ()
       feed('o<C-x><C-u>Ja')
       screen:expect([[
@@ -712,6 +713,118 @@ describe('completion', function()
     end)
   end)
 
+  it("does not indent until an item is selected #8345", function ()
+    -- Indents on "ind", unindents on "unind".
+    source([[
+      function! TestIndent()
+        let line = getline(v:lnum)
+        if (line =~ '^\s*ind')
+          return indent(v:lnum-1) + shiftwidth()
+        elseif (line =~ '^\s*unind')
+          return indent(v:lnum-1) - shiftwidth()
+        else
+          return indent(v:lnum-1)
+        endif
+      endfunction
+      set indentexpr=TestIndent()
+      set indentkeys=o,O,!^F,=ind,=unind
+      set completeopt+=menuone
+    ]])
+
+    -- Give some words to complete.
+    feed("iinc uninc indent unindent<CR>")
+
+    -- Does not indent when "ind" is typed.
+    feed("in<C-X><C-N>")
+    -- Completion list is generated incorrectly if we send everything at once
+    -- via nvim_input().  So wait() before sending <BS>. #8480
+    wait()
+    feed("<BS>d")
+
+    screen:expect([[
+      inc uninc indent unindent                                   |
+      ind^                                                         |
+      {2:indent         }{0:                                             }|
+      {0:~                                                           }|
+      {0:~                                                           }|
+      {0:~                                                           }|
+      {0:~                                                           }|
+      {3:-- Keyword Local completion (^N^P) }{4:match 1 of 2}             |
+    ]])
+
+    -- Indents when the item is selected
+    feed("<C-Y>")
+    screen:expect([[
+      inc uninc indent unindent                                   |
+              indent^                                              |
+      {0:~                                                           }|
+      {0:~                                                           }|
+      {0:~                                                           }|
+      {0:~                                                           }|
+      {0:~                                                           }|
+      {3:-- INSERT --}                                                |
+    ]])
+    -- Indents when completion is exited using ESC.
+    feed("<CR>in<C-N><BS>d<Esc>")
+    screen:expect([[
+      inc uninc indent unindent                                   |
+              indent                                              |
+                      in^d                                         |
+      {0:~                                                           }|
+      {0:~                                                           }|
+      {0:~                                                           }|
+      {0:~                                                           }|
+                                                                  |
+    ]])
+    -- Works for unindenting too.
+    feed("ounin<C-X><C-N>")
+    helpers.wait()
+    feed("<BS>d")
+    screen:expect([[
+      inc uninc indent unindent                                   |
+              indent                                              |
+                      ind                                         |
+                      unind^                                       |
+      {0:~              }{2: unindent       }{0:                             }|
+      {0:~                                                           }|
+      {0:~                                                           }|
+      {3:-- Keyword Local completion (^N^P) }{4:match 1 of 2}             |
+    ]])
+    -- Works when going back and forth.
+    feed("<BS>c")
+    screen:expect([[
+      inc uninc indent unindent                                   |
+              indent                                              |
+                      ind                                         |
+                      uninc^                                       |
+      {0:~              }{2: uninc          }{0:                             }|
+      {0:~                                                           }|
+      {0:~                                                           }|
+      {3:-- Keyword Local completion (^N^P) }{4:match 1 of 2}             |
+    ]])
+    feed("<BS>d")
+    screen:expect([[
+      inc uninc indent unindent                                   |
+              indent                                              |
+                      ind                                         |
+                      unind^                                       |
+      {0:~              }{2: unindent       }{0:                             }|
+      {0:~                                                           }|
+      {0:~                                                           }|
+      {3:-- Keyword Local completion (^N^P) }{4:match 1 of 2}             |
+    ]])
+    feed("<C-N><C-N><C-Y><Esc>")
+    screen:expect([[
+      inc uninc indent unindent                                   |
+              indent                                              |
+                      ind                                         |
+              uninden^t                                            |
+      {0:~                                                           }|
+      {0:~                                                           }|
+      {0:~                                                           }|
+                                                                  |
+    ]])
+  end)
 
   it('disables folding during completion', function ()
     feed_command("set foldmethod=indent")
@@ -757,7 +870,7 @@ describe('completion', function()
 
     eval('1 + 1')
     -- popupmenu still visible
-    screen:expect([[
+    screen:expect{grid=[[
       foobar fooegg                                               |
       fooegg^                                                      |
       {1:foobar         }{0:                                             }|
@@ -766,7 +879,7 @@ describe('completion', function()
       {0:~                                                           }|
       {0:~                                                           }|
       {3:-- Keyword completion (^N^P) }{4:match 1 of 2}                   |
-    ]])
+    ]], unchanged=true}
 
     feed('<c-p>')
     -- Didn't restart completion: old matches still used
@@ -873,107 +986,6 @@ describe('completion', function()
       {3:-- Keyword Local completion (^N^P) }{4:match 1 of 7}             |
     ]])
   end)
-end)
-
-describe('ui/ext_popupmenu', function()
-  local screen
-  local items, selected, anchor
-  before_each(function()
-    clear()
-    screen = Screen.new(60, 8)
-    screen:attach({rgb=true, ext_popupmenu=true})
-    screen:set_default_attr_ids({
-      [1] = {bold=true, foreground=Screen.colors.Blue},
-      [2] = {bold = true},
-    })
-    screen:set_on_event_handler(function(name, data)
-      if name == "popupmenu_show" then
-        local row, col
-        items, selected, row, col = unpack(data)
-        anchor = {row, col}
-      elseif name == "popupmenu_select" then
-        selected = data[1]
-      elseif name == "popupmenu_hide" then
-        items = nil
-      end
-    end)
-  end)
-
-  it('works', function()
-    source([[
-      function! TestComplete() abort
-        call complete(1, ['foo', 'bar', 'spam'])
-        return ''
-      endfunction
-    ]])
-    local expected = {
-      {'foo', '', '', ''},
-      {'bar', '', '', ''},
-      {'spam', '', '', ''},
-    }
-    feed('o<C-r>=TestComplete()<CR>')
-    screen:expect([[
-                                                                  |
-      foo^                                                         |
-      {1:~                                                           }|
-      {1:~                                                           }|
-      {1:~                                                           }|
-      {1:~                                                           }|
-      {1:~                                                           }|
-      {2:-- INSERT --}                                                |
-    ]], nil, nil, function()
-      eq(expected, items)
-      eq(0, selected)
-      eq({1,0}, anchor)
-    end)
-
-    feed('<c-p>')
-    screen:expect([[
-                                                                  |
-      ^                                                            |
-      {1:~                                                           }|
-      {1:~                                                           }|
-      {1:~                                                           }|
-      {1:~                                                           }|
-      {1:~                                                           }|
-      {2:-- INSERT --}                                                |
-    ]], nil, nil, function()
-      eq(expected, items)
-      eq(-1, selected)
-      eq({1,0}, anchor)
-    end)
-
-    -- down moves the selection in the menu, but does not insert anything
-    feed('<down><down>')
-    screen:expect([[
-                                                                  |
-      ^                                                            |
-      {1:~                                                           }|
-      {1:~                                                           }|
-      {1:~                                                           }|
-      {1:~                                                           }|
-      {1:~                                                           }|
-      {2:-- INSERT --}                                                |
-    ]], nil, nil, function()
-      eq(expected, items)
-      eq(1, selected)
-      eq({1,0}, anchor)
-    end)
-
-    feed('<cr>')
-    screen:expect([[
-                                                                  |
-      bar^                                                         |
-      {1:~                                                           }|
-      {1:~                                                           }|
-      {1:~                                                           }|
-      {1:~                                                           }|
-      {1:~                                                           }|
-      {2:-- INSERT --}                                                |
-    ]], nil, nil, function()
-      eq(nil, items) -- popupmenu was hidden
-    end)
-  end)
 
   it('TextChangedP autocommand', function()
     curbufmeths.set_lines(0, 1, false, { 'foo', 'bar', 'foobar'})
@@ -1059,5 +1071,84 @@ describe('ui/ext_popupmenu', function()
       au! TextChangedP
       set complete&vim completeopt&vim
     ]])
+  end)
+
+  it('MenuPopupChanged autocommand', function()
+    curbufmeths.set_lines(0, 1, false, { 'foo', 'bar', 'foobar', ''})
+    source([[
+      set complete=. completeopt=noinsert,noselect,menuone
+      function! OnPumChange()
+        let g:event = copy(v:event)
+        let g:item = get(v:event, 'completed_item', {})
+        let g:word = get(g:item, 'word', v:null)
+      endfunction
+      autocmd! MenuPopupChanged * :call OnPumChange()
+      call cursor(4, 1)
+    ]])
+
+    feed('Sf<C-N>')
+    screen:expect([[
+      foo                                                         |
+      bar                                                         |
+      foobar                                                      |
+      f^                                                           |
+      {1:foo            }{0:                                             }|
+      {1:foobar         }{0:                                             }|
+      {0:~                                                           }|
+      {3:-- Keyword completion (^N^P) }{5:Back at original}               |
+    ]])
+    eq({completed_item = {}, width = 15,
+      height = 2, size = 2,
+      col = 0, row = 4, scrollbar = false},
+      eval('g:event'))
+    feed('<C-N>')
+    screen:expect([[
+      foo                                                         |
+      bar                                                         |
+      foobar                                                      |
+      foo^                                                         |
+      {2:foo            }{0:                                             }|
+      {1:foobar         }{0:                                             }|
+      {0:~                                                           }|
+      {3:-- Keyword completion (^N^P) }{4:match 1 of 2}                   |
+    ]])
+    eq('foo', eval('g:word'))
+    feed('<C-N>')
+    screen:expect([[
+      foo                                                         |
+      bar                                                         |
+      foobar                                                      |
+      foobar^                                                      |
+      {1:foo            }{0:                                             }|
+      {2:foobar         }{0:                                             }|
+      {0:~                                                           }|
+      {3:-- Keyword completion (^N^P) }{4:match 2 of 2}                   |
+    ]])
+    eq('foobar', eval('g:word'))
+    feed('<up>')
+    screen:expect([[
+      foo                                                         |
+      bar                                                         |
+      foobar                                                      |
+      foobar^                                                      |
+      {2:foo            }{0:                                             }|
+      {1:foobar         }{0:                                             }|
+      {0:~                                                           }|
+      {3:-- Keyword completion (^N^P) }{4:match 1 of 2}                   |
+    ]])
+    eq('foo', eval('g:word'))
+    feed('<down>')
+    screen:expect([[
+      foo                                                         |
+      bar                                                         |
+      foobar                                                      |
+      foobar^                                                      |
+      {1:foo            }{0:                                             }|
+      {2:foobar         }{0:                                             }|
+      {0:~                                                           }|
+      {3:-- Keyword completion (^N^P) }{4:match 2 of 2}                   |
+    ]])
+    eq('foobar', eval('g:word'))
+    feed('<esc>')
   end)
 end)

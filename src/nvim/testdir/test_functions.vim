@@ -96,6 +96,30 @@ func Test_min()
   " call assert_fails('call min(v:none)', 'E712:')
 endfunc
 
+func Test_strwidth()
+  for aw in ['single', 'double']
+    exe 'set ambiwidth=' . aw
+    call assert_equal(0, strwidth(''))
+    call assert_equal(1, strwidth("\t"))
+    call assert_equal(3, strwidth('Vim'))
+    call assert_equal(4, strwidth(1234))
+    call assert_equal(5, strwidth(-1234))
+
+    if has('multi_byte')
+      call assert_equal(2, strwidth('😉'))
+      call assert_equal(17, strwidth('Eĥoŝanĝo ĉiuĵaŭde'))
+      call assert_equal((aw == 'single') ? 6 : 7, strwidth('Straße'))
+    endif
+
+    call assert_fails('call strwidth({->0})', 'E729:')
+    call assert_fails('call strwidth([])', 'E730:')
+    call assert_fails('call strwidth({})', 'E731:')
+    call assert_fails('call strwidth(1.2)', 'E806:')
+  endfor
+
+  set ambiwidth&
+endfunc
+
 func Test_str2nr()
   call assert_equal(0, str2nr(''))
   call assert_equal(1, str2nr('1'))
@@ -165,6 +189,52 @@ func Test_strftime()
   call assert_fails('call strftime("%Y", [])', 'E745:')
 endfunc
 
+func Test_resolve()
+  if !has('unix')
+    return
+  endif
+
+  " Xlink1 -> Xlink2
+  " Xlink2 -> Xlink3
+  silent !ln -s -f Xlink2 Xlink1
+  silent !ln -s -f Xlink3 Xlink2
+  call assert_equal('Xlink3', resolve('Xlink1'))
+  call assert_equal('./Xlink3', resolve('./Xlink1'))
+  call assert_equal('Xlink3/', resolve('Xlink2/'))
+  " FIXME: these tests result in things like "Xlink2/" instead of "Xlink3/"?!
+  "call assert_equal('Xlink3/', resolve('Xlink1/'))
+  "call assert_equal('./Xlink3/', resolve('./Xlink1/'))
+  "call assert_equal(getcwd() . '/Xlink3/', resolve(getcwd() . '/Xlink1/'))
+  call assert_equal(getcwd() . '/Xlink3', resolve(getcwd() . '/Xlink1'))
+
+  " Test resolve() with a symlink cycle.
+  " Xlink1 -> Xlink2
+  " Xlink2 -> Xlink3
+  " Xlink3 -> Xlink1
+  silent !ln -s -f Xlink1 Xlink3
+  call assert_fails('call resolve("Xlink1")',   'E655:')
+  call assert_fails('call resolve("./Xlink1")', 'E655:')
+  call assert_fails('call resolve("Xlink2")',   'E655:')
+  call assert_fails('call resolve("Xlink3")',   'E655:')
+  call delete('Xlink1')
+  call delete('Xlink2')
+  call delete('Xlink3')
+
+  silent !ln -s -f Xdir//Xfile Xlink
+  call assert_equal('Xdir/Xfile', resolve('Xlink'))
+  call delete('Xlink')
+
+  silent !ln -s -f Xlink2/ Xlink1
+  call assert_equal('Xlink2', resolve('Xlink1'))
+  call assert_equal('Xlink2/', resolve('Xlink1/'))
+  call delete('Xlink1')
+
+  silent !ln -s -f ./Xlink2 Xlink1
+  call assert_equal('Xlink2', resolve('Xlink1'))
+  call assert_equal('./Xlink2', resolve('./Xlink1'))
+  call delete('Xlink1')
+endfunc
+
 func Test_simplify()
   call assert_equal('',            simplify(''))
   call assert_equal('/',           simplify('/'))
@@ -213,6 +283,21 @@ func Test_setbufvar_options()
   bwipe!
   call win_gotoid(dum1_id)
   bwipe!
+endfunc
+
+func Test_pathshorten()
+  call assert_equal('', pathshorten(''))
+  call assert_equal('foo', pathshorten('foo'))
+  call assert_equal('/foo', pathshorten('/foo'))
+  call assert_equal('f/', pathshorten('foo/'))
+  call assert_equal('f/bar', pathshorten('foo/bar'))
+  call assert_equal('f/b/foobar', pathshorten('foo/bar/foobar'))
+  call assert_equal('/f/b/foobar', pathshorten('/foo/bar/foobar'))
+  call assert_equal('.f/bar', pathshorten('.foo/bar'))
+  call assert_equal('~f/bar', pathshorten('~foo/bar'))
+  call assert_equal('~.f/bar', pathshorten('~.foo/bar'))
+  call assert_equal('.~f/bar', pathshorten('.~foo/bar'))
+  call assert_equal('~/f/bar', pathshorten('~/foo/bar'))
 endfunc
 
 func Test_strpart()
@@ -299,6 +384,11 @@ func Test_tolower()
   " Ⱥ (U+023A) and Ⱦ (U+023E) are the *only* code points to increase
   " in length (2 to 3 bytes) when lowercased. So let's test them.
   call assert_equal("ⱥ ⱦ", tolower("Ⱥ Ⱦ"))
+
+  " This call to tolower with invalid utf8 sequence used to cause access to
+  " invalid memory.
+  call tolower("\xC0\x80\xC0")
+  call tolower("123\xC0\x80\xC0")
 endfunc
 
 func Test_toupper()
@@ -369,6 +459,11 @@ func Test_toupper()
   call assert_equal("ZŹŻŽƵẐẔ", toupper("ZŹŻŽƵẐẔ"))
 
   call assert_equal("Ⱥ Ⱦ", toupper("ⱥ ⱦ"))
+
+  " This call to toupper with invalid utf8 sequence used to cause access to
+  " invalid memory.
+  call toupper("\xC0\x80\xC0")
+  call toupper("123\xC0\x80\xC0")
 endfunc
 
 " Tests for the mode() function
@@ -460,6 +555,18 @@ func Test_mode()
 
   call assert_equal('n', mode(0))
   call assert_equal('n', mode(1))
+
+  " i_CTRL-O
+  exe "normal i\<C-O>:call Save_mode()\<Cr>\<Esc>"
+  call assert_equal("n-niI", g:current_modes)
+
+  " R_CTRL-O
+  exe "normal R\<C-O>:call Save_mode()\<Cr>\<Esc>"
+  call assert_equal("n-niR", g:current_modes)
+
+  " gR_CTRL-O
+  exe "normal gR\<C-O>:call Save_mode()\<Cr>\<Esc>"
+  call assert_equal("n-niV", g:current_modes)
 
   " How to test operator-pending mode?
 
@@ -573,10 +680,46 @@ func Test_strridx()
   call assert_equal(-1, strridx('hello', 'hello world'))
 endfunc
 
+func Test_match_func()
+  call assert_equal(4,  match('testing', 'ing'))
+  call assert_equal(4,  match('testing', 'ing', 2))
+  call assert_equal(-1, match('testing', 'ing', 5))
+  call assert_equal(-1, match('testing', 'ing', 8))
+  call assert_equal(1, match(['vim', 'testing', 'execute'], 'ing'))
+  call assert_equal(-1, match(['vim', 'testing', 'execute'], 'img'))
+endfunc
+
 func Test_matchend()
   call assert_equal(7,  matchend('testing', 'ing'))
   call assert_equal(7,  matchend('testing', 'ing', 2))
   call assert_equal(-1, matchend('testing', 'ing', 5))
+  call assert_equal(-1, matchend('testing', 'ing', 8))
+  call assert_equal(match(['vim', 'testing', 'execute'], 'ing'), matchend(['vim', 'testing', 'execute'], 'ing'))
+  call assert_equal(match(['vim', 'testing', 'execute'], 'img'), matchend(['vim', 'testing', 'execute'], 'img'))
+endfunc
+
+func Test_matchlist()
+  call assert_equal(['acd', 'a', '', 'c', 'd', '', '', '', '', ''],  matchlist('acd', '\(a\)\?\(b\)\?\(c\)\?\(.*\)'))
+  call assert_equal(['d', '', '', '', 'd', '', '', '', '', ''],  matchlist('acd', '\(a\)\?\(b\)\?\(c\)\?\(.*\)', 2))
+  call assert_equal([],  matchlist('acd', '\(a\)\?\(b\)\?\(c\)\?\(.*\)', 4))
+endfunc
+
+func Test_matchstr()
+  call assert_equal('ing',  matchstr('testing', 'ing'))
+  call assert_equal('ing',  matchstr('testing', 'ing', 2))
+  call assert_equal('', matchstr('testing', 'ing', 5))
+  call assert_equal('', matchstr('testing', 'ing', 8))
+  call assert_equal('testing', matchstr(['vim', 'testing', 'execute'], 'ing'))
+  call assert_equal('', matchstr(['vim', 'testing', 'execute'], 'img'))
+endfunc
+
+func Test_matchstrpos()
+  call assert_equal(['ing', 4, 7], matchstrpos('testing', 'ing'))
+  call assert_equal(['ing', 4, 7], matchstrpos('testing', 'ing', 2))
+  call assert_equal(['', -1, -1], matchstrpos('testing', 'ing', 5))
+  call assert_equal(['', -1, -1], matchstrpos('testing', 'ing', 8))
+  call assert_equal(['ing', 1, 4, 7], matchstrpos(['vim', 'testing', 'execute'], 'ing'))
+  call assert_equal(['', -1, -1, -1], matchstrpos(['vim', 'testing', 'execute'], 'img'))
 endfunc
 
 func Test_nextnonblank_prevnonblank()
@@ -616,6 +759,7 @@ endfunc
 
 func Test_byte2line_line2byte()
   new
+  set endofline
   call setline(1, ['a', 'bc', 'd'])
 
   set fileformat=unix
@@ -636,7 +780,16 @@ func Test_byte2line_line2byte()
   call assert_equal([-1, -1, 1, 4, 8, 11, -1],
   \                 map(range(-1, 5), 'line2byte(v:val)'))
 
-  set fileformat&
+  bw!
+  set noendofline nofixendofline
+  normal a-
+  for ff in ["unix", "mac", "dos"]
+    let &fileformat = ff
+    call assert_equal(1, line2byte(1))
+    call assert_equal(2, line2byte(2))  " line2byte(line("$") + 1) is the buffer size plus one (as per :help line2byte).
+  endfor
+
+  set endofline& fixendofline& fileformat&
   bw!
 endfunc
 
@@ -687,6 +840,7 @@ func Test_count()
   call assert_equal(0, count("foo", "O"))
   call assert_equal(2, count("foo", "O", 1))
   call assert_equal(2, count("fooooo", "oo"))
+  call assert_equal(0, count("foo", ""))
 endfunc
 
 func Test_changenr()
@@ -720,6 +874,19 @@ func Test_filewritable()
 
   call delete('Xfilewritable')
   bw!
+endfunc
+
+func Test_Executable()
+  if has('win32')
+    call assert_equal(1, executable('notepad'))
+    call assert_equal(1, executable('notepad.exe'))
+    call assert_equal(0, executable('notepad.exe.exe'))
+    call assert_equal(1, executable('shell32.dll'))
+    call assert_equal(1, executable('win.ini'))
+  elseif has('unix')
+    call assert_equal(1, executable('cat'))
+    call assert_equal(0, executable('nodogshere'))
+  endif
 endfunc
 
 func Test_hostname()
@@ -770,6 +937,17 @@ func Test_col()
   bw!
 endfunc
 
+func Test_inputlist()
+  call feedkeys(":let c = inputlist(['Select color:', '1. red', '2. green', '3. blue'])\<cr>1\<cr>", 'tx')
+  call assert_equal(1, c)
+  call feedkeys(":let c = inputlist(['Select color:', '1. red', '2. green', '3. blue'])\<cr>2\<cr>", 'tx')
+  call assert_equal(2, c)
+  call feedkeys(":let c = inputlist(['Select color:', '1. red', '2. green', '3. blue'])\<cr>3\<cr>", 'tx')
+  call assert_equal(3, c)
+
+  call assert_fails('call inputlist("")', 'E686:')
+endfunc
+
 func Test_balloon_show()
   if has('balloon_eval')
     " This won't do anything but must not crash either.
@@ -778,8 +956,8 @@ func Test_balloon_show()
 endfunc
 
 func Test_shellescape()
-  let save_shell = &shell
-  set shell=bash
+  let [save_shell, save_shellslash] = [&shell, &shellslash]
+  set shell=bash shellslash
   call assert_equal("'text'", shellescape('text'))
   call assert_equal("'te\"xt'", shellescape('te"xt'))
   call assert_equal("'te'\\''xt'", shellescape("te'xt"))
@@ -793,13 +971,13 @@ func Test_shellescape()
 
   call assert_equal("'te\nxt'", shellescape("te\nxt"))
   call assert_equal("'te\\\nxt'", shellescape("te\nxt", 1))
-  set shell=tcsh
+  set shell=tcsh shellslash
   call assert_equal("'te\\!xt'", shellescape("te!xt"))
   call assert_equal("'te\\\\!xt'", shellescape("te!xt", 1))
   call assert_equal("'te\\\nxt'", shellescape("te\nxt"))
   call assert_equal("'te\\\\\nxt'", shellescape("te\nxt", 1))
 
-  let &shell = save_shell
+  let [&shell, &shellslash] = [save_shell, save_shellslash]
 endfunc
 
 func Test_redo_in_nested_functions()
@@ -828,4 +1006,46 @@ func Test_redo_in_nested_functions()
   nunmap g.
   delfunc Operator
   delfunc Apply
+endfunc
+
+func Test_trim()
+  call assert_equal("Testing", trim("  \t\r\r\x0BTesting  \t\n\r\n\t\x0B\x0B"))
+  call assert_equal("Testing", trim("  \t  \r\r\n\n\x0BTesting  \t\n\r\n\t\x0B\x0B"))
+  call assert_equal("RESERVE", trim("xyz \twwRESERVEzyww \t\t", " wxyz\t"))
+  call assert_equal("wRE    \tSERVEzyww", trim("wRE    \tSERVEzyww"))
+  call assert_equal("abcd\t     xxxx   tail", trim(" \tabcd\t     xxxx   tail"))
+  call assert_equal("\tabcd\t     xxxx   tail", trim(" \tabcd\t     xxxx   tail", " "))
+  call assert_equal(" \tabcd\t     xxxx   tail", trim(" \tabcd\t     xxxx   tail", "abx"))
+  call assert_equal("RESERVE", trim("你RESERVE好", "你好"))
+  call assert_equal("您R E SER V E早", trim("你好您R E SER V E早好你你", "你好"))
+  call assert_equal("你好您R E SER V E早好你你", trim(" \n\r\r   你好您R E SER V E早好你你    \t  \x0B", ))
+  call assert_equal("您R E SER V E早好你你    \t  \x0B", trim("    你好您R E SER V E早好你你    \t  \x0B", " 你好"))
+  call assert_equal("您R E SER V E早好你你    \t  \x0B", trim("    tteesstttt你好您R E SER V E早好你你    \t  \x0B ttestt", " 你好tes"))
+  call assert_equal("您R E SER V E早好你你    \t  \x0B", trim("    tteesstttt你好您R E SER V E早好你你    \t  \x0B ttestt", "   你你你好好好tttsses"))
+  call assert_equal("留下", trim("这些些不要这些留下这些", "这些不要"))
+  call assert_equal("", trim("", ""))
+  call assert_equal("a", trim("a", ""))
+  call assert_equal("", trim("", "a"))
+
+  let chars = join(map(range(1, 0x20) + [0xa0], {n -> nr2char(n)}), '')
+  call assert_equal("x", trim(chars . "x" . chars))
+endfunc
+
+func EditAnotherFile()
+  let word = expand('<cword>')
+  edit Xfuncrange2
+endfunc
+
+func Test_func_range_with_edit()
+  " Define a function that edits another buffer, then call it with a range that
+  " is invalid in that buffer.
+  call writefile(['just one line'], 'Xfuncrange2')
+  new
+  call setline(1, range(10))
+  write Xfuncrange1
+  call assert_fails('5,8call EditAnotherFile()', 'E16:')
+
+  call delete('Xfuncrange1')
+  call delete('Xfuncrange2')
+  bwipe!
 endfunc

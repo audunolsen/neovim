@@ -27,6 +27,7 @@
 #include "nvim/version.h"
 #include "nvim/lib/kvec.h"
 #include "nvim/getchar.h"
+#include "nvim/fileio.h"
 #include "nvim/ui.h"
 
 /// Helper structure for vim_to_object
@@ -162,7 +163,7 @@ Object dict_get_value(dict_T *dict, String key, Error *err)
   dictitem_T *const di = tv_dict_find(dict, key.data, (ptrdiff_t)key.size);
 
   if (di == NULL) {
-    api_set_error(err, kErrorTypeValidation, "Key '%s' not found", key.data);
+    api_set_error(err, kErrorTypeValidation, "Key not found: %s", key.data);
     return (Object)OBJECT_INIT;
   }
 
@@ -184,43 +185,35 @@ Object dict_set_var(dict_T *dict, String key, Object value, bool del,
                     bool retval, Error *err)
 {
   Object rv = OBJECT_INIT;
-
-  if (dict->dv_lock) {
-    api_set_error(err, kErrorTypeException, "Dictionary is locked");
-    return rv;
-  }
-
-  if (key.size == 0) {
-    api_set_error(err, kErrorTypeValidation,
-                  "Empty variable names aren't allowed");
-    return rv;
-  }
-
-  if (key.size > INT_MAX) {
-    api_set_error(err, kErrorTypeValidation, "Key length is too high");
-    return rv;
-  }
-
   dictitem_T *di = tv_dict_find(dict, key.data, (ptrdiff_t)key.size);
 
   if (di != NULL) {
     if (di->di_flags & DI_FLAGS_RO) {
       api_set_error(err, kErrorTypeException, "Key is read-only: %s", key.data);
       return rv;
-    } else if (di->di_flags & DI_FLAGS_FIX) {
-      api_set_error(err, kErrorTypeException, "Key is fixed: %s", key.data);
-      return rv;
     } else if (di->di_flags & DI_FLAGS_LOCK) {
       api_set_error(err, kErrorTypeException, "Key is locked: %s", key.data);
       return rv;
+    } else if (del && (di->di_flags & DI_FLAGS_FIX)) {
+      api_set_error(err, kErrorTypeException, "Key is fixed: %s", key.data);
+      return rv;
     }
+  } else if (dict->dv_lock) {
+    api_set_error(err, kErrorTypeException, "Dictionary is locked");
+    return rv;
+  } else if (key.size == 0) {
+    api_set_error(err, kErrorTypeValidation, "Key name is empty");
+    return rv;
+  } else if (key.size > INT_MAX) {
+    api_set_error(err, kErrorTypeValidation, "Key name is too long");
+    return rv;
   }
 
   if (del) {
     // Delete the key
     if (di == NULL) {
       // Doesn't exist, fail
-      api_set_error(err, kErrorTypeValidation, "Key does not exist: %s",
+      api_set_error(err, kErrorTypeValidation, "Key not found: %s",
                     key.data);
     } else {
       // Return the old value
@@ -284,9 +277,7 @@ Object get_option_from(void *from, int type, String name, Error *err)
                                       type, from);
 
   if (!flags) {
-    api_set_error(err,
-                  kErrorTypeValidation,
-                  "Invalid option name \"%s\"",
+    api_set_error(err, kErrorTypeValidation, "Invalid option name: '%s'",
                   name.data);
     return rv;
   }
@@ -303,15 +294,14 @@ Object get_option_from(void *from, int type, String name, Error *err)
       rv.data.string.data = stringval;
       rv.data.string.size = strlen(stringval);
     } else {
-      api_set_error(err,
-                    kErrorTypeException,
-                    "Unable to get value for option \"%s\"",
+      api_set_error(err, kErrorTypeException,
+                    "Failed to get value for option '%s'",
                     name.data);
     }
   } else {
     api_set_error(err,
                   kErrorTypeException,
-                  "Unknown type for option \"%s\"",
+                  "Unknown type for option '%s'",
                   name.data);
   }
 
@@ -336,24 +326,20 @@ void set_option_to(uint64_t channel_id, void *to, int type,
   int flags = get_option_value_strict(name.data, NULL, NULL, type, to);
 
   if (flags == 0) {
-    api_set_error(err,
-                  kErrorTypeValidation,
-                  "Invalid option name \"%s\"",
+    api_set_error(err, kErrorTypeValidation, "Invalid option name '%s'",
                   name.data);
     return;
   }
 
   if (value.type == kObjectTypeNil) {
     if (type == SREQ_GLOBAL) {
-      api_set_error(err,
-                    kErrorTypeException,
-                    "Unable to unset option \"%s\"",
+      api_set_error(err, kErrorTypeException, "Cannot unset option '%s'",
                     name.data);
       return;
     } else if (!(flags & SOPT_GLOBAL)) {
       api_set_error(err,
                     kErrorTypeException,
-                    "Cannot unset option \"%s\" "
+                    "Cannot unset option '%s' "
                     "because it doesn't have a global value",
                     name.data);
       return;
@@ -370,7 +356,7 @@ void set_option_to(uint64_t channel_id, void *to, int type,
     if (value.type != kObjectTypeBoolean) {
       api_set_error(err,
                     kErrorTypeValidation,
-                    "Option \"%s\" requires a boolean value",
+                    "Option '%s' requires a Boolean value",
                     name.data);
       return;
     }
@@ -378,17 +364,15 @@ void set_option_to(uint64_t channel_id, void *to, int type,
     numval = value.data.boolean;
   } else if (flags & SOPT_NUM) {
     if (value.type != kObjectTypeInteger) {
-      api_set_error(err,
-                    kErrorTypeValidation,
-                    "Option \"%s\" requires an integer value",
+      api_set_error(err, kErrorTypeValidation,
+                    "Option '%s' requires an integer value",
                     name.data);
       return;
     }
 
     if (value.data.integer > INT_MAX || value.data.integer < INT_MIN) {
-      api_set_error(err,
-                    kErrorTypeValidation,
-                    "Value for option \"%s\" is outside range",
+      api_set_error(err, kErrorTypeValidation,
+                    "Value for option '%s' is out of range",
                     name.data);
       return;
     }
@@ -396,9 +380,8 @@ void set_option_to(uint64_t channel_id, void *to, int type,
     numval = (int)value.data.integer;
   } else {
     if (value.type != kObjectTypeString) {
-      api_set_error(err,
-                    kErrorTypeValidation,
-                    "Option \"%s\" requires a string value",
+      api_set_error(err, kErrorTypeValidation,
+                    "Option '%s' requires a string value",
                     name.data);
       return;
     }
@@ -729,6 +712,12 @@ String cbuf_to_string(const char *buf, size_t size)
   };
 }
 
+String cstrn_to_string(const char *str, size_t maxsize)
+  FUNC_ATTR_NONNULL_ALL
+{
+  return cbuf_to_string(str, strnlen(str, maxsize));
+}
+
 /// Creates a String using the given C string. Unlike
 /// cstr_to_string this function DOES NOT copy the C string.
 ///
@@ -741,6 +730,18 @@ String cstr_as_string(char *str) FUNC_ATTR_PURE
     return (String)STRING_INIT;
   }
   return (String){ .data = str, .size = strlen(str) };
+}
+
+/// Return the owned memory of a ga as a String
+///
+/// Reinitializes the ga to a valid empty state.
+String ga_take_string(garray_T *ga)
+{
+  String str = { .data = (char *)ga->ga_data, .size = (size_t)ga->ga_len };
+  ga->ga_data = NULL;
+  ga->ga_len = 0;
+  ga->ga_maxlen = 0;
+  return str;
 }
 
 /// Collects `n` buffer lines into array `l`, optionally replacing newlines
@@ -1003,7 +1004,9 @@ static void init_ui_event_metadata(Dictionary *metadata)
   Array ui_options = ARRAY_DICT_INIT;
   ADD(ui_options, STRING_OBJ(cstr_to_string("rgb")));
   for (UIExtension i = 0; i < kUIExtCount; i++) {
-    ADD(ui_options, STRING_OBJ(cstr_to_string(ui_ext_names[i])));
+    if (ui_ext_names[i][0] != '_') {
+      ADD(ui_options, STRING_OBJ(cstr_to_string(ui_ext_names[i])));
+    }
   }
   PUT(*metadata, "ui_options", ARRAY_OBJ(ui_options));
 }
@@ -1112,7 +1115,7 @@ static void set_option_value_for(char *key,
 {
   win_T *save_curwin = NULL;
   tabpage_T *save_curtab = NULL;
-  bufref_T save_curbuf =  { NULL, 0, 0 };
+  aco_save_T aco;
 
   try_start();
   switch (opt_type)
@@ -1133,9 +1136,9 @@ static void set_option_value_for(char *key,
       restore_win(save_curwin, save_curtab, true);
       break;
     case SREQ_BUF:
-      switch_buffer(&save_curbuf, (buf_T *)from);
+      aucmd_prepbuf(&aco, (buf_T *)from);
       set_option_value_err(key, numval, stringval, opt_flags, err);
-      restore_buffer(&save_curbuf);
+      aucmd_restbuf(&aco);
       break;
     case SREQ_GLOBAL:
       set_option_value_err(key, numval, stringval, opt_flags, err);
@@ -1168,7 +1171,7 @@ static void set_option_value_err(char *key,
 }
 
 void api_set_error(Error *err, ErrorType errType, const char *format, ...)
-  FUNC_ATTR_NONNULL_ALL
+  FUNC_ATTR_NONNULL_ALL FUNC_ATTR_PRINTF(3, 4)
 {
   assert(kErrorTypeNone != errType);
   va_list args1;

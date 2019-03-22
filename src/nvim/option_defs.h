@@ -74,13 +74,14 @@
 #define FO_MBYTE_JOIN   'M'     /* no space before/after multi-byte char */
 #define FO_MBYTE_JOIN2  'B'     /* no space between multi-byte chars */
 #define FO_ONE_LETTER   '1'
-#define FO_WHITE_PAR    'w'     /* trailing white space continues paragr. */
-#define FO_AUTO         'a'     /* automatic formatting */
-#define FO_REMOVE_COMS  'j'     /* remove comment leaders when joining lines */
+#define FO_WHITE_PAR    'w'     // trailing white space continues paragr.
+#define FO_AUTO         'a'     // automatic formatting
+#define FO_REMOVE_COMS  'j'     // remove comment leaders when joining lines
+#define FO_PERIOD_ABBR  'p'     // don't break a single space after a period
 
 #define DFLT_FO_VI      "vt"
 #define DFLT_FO_VIM     "tcqj"
-#define FO_ALL          "tcroq2vlb1mMBn,awj"    /* for do_set() */
+#define FO_ALL          "tcroq2vlb1mMBn,awjp"   // for do_set()
 
 // characters for the p_cpo option:
 #define CPO_ALTREAD     'a'     // ":read" sets alternate file name
@@ -375,6 +376,7 @@ EXTERN int p_confirm;           // 'confirm'
 EXTERN int p_cp;                // 'compatible'
 EXTERN char_u   *p_cot;         // 'completeopt'
 EXTERN long p_ph;               // 'pumheight'
+EXTERN long p_pb;               // 'pumblend'
 EXTERN char_u   *p_cpo;         // 'cpoptions'
 EXTERN char_u   *p_csprg;       // 'cscopeprg'
 EXTERN int p_csre;              // 'cscoperelative'
@@ -463,8 +465,6 @@ EXTERN int p_hls;               // 'hlsearch'
 EXTERN long p_hi;               // 'history'
 EXTERN int p_hkmap;             // 'hkmap'
 EXTERN int p_hkmapp;            // 'hkmapp'
-EXTERN int p_fkmap;             // 'fkmap'
-EXTERN int p_altkeymap;         // 'altkeymap'
 EXTERN int p_arshape;           // 'arabicshape'
 EXTERN int p_icon;              // 'icon'
 EXTERN char_u   *p_iconstring;  // 'iconstring'
@@ -486,7 +486,6 @@ EXTERN long     *p_linespace;   // 'linespace'
 EXTERN char_u   *p_lispwords;   // 'lispwords'
 EXTERN long p_ls;               // 'laststatus'
 EXTERN long p_stal;             // 'showtabline'
-EXTERN char_u   *p_lcs;         // 'listchars'
 
 EXTERN int p_lz;                // 'lazyredraw'
 EXTERN int p_lpl;               // 'loadplugins'
@@ -516,6 +515,7 @@ EXTERN char_u   *p_pex;         // 'patchexpr'
 EXTERN char_u   *p_pm;          // 'patchmode'
 EXTERN char_u   *p_path;        // 'path'
 EXTERN char_u   *p_cdpath;      // 'cdpath'
+EXTERN long p_pyx;              // 'pyxversion'
 EXTERN long p_rdt;              // 'redrawtime'
 EXTERN int p_remap;             // 'remap'
 EXTERN long p_re;               // 'regexpengine'
@@ -637,7 +637,6 @@ EXTERN long p_ul;               ///< 'undolevels'
 EXTERN long p_ur;               ///< 'undoreload'
 EXTERN long p_uc;               ///< 'updatecount'
 EXTERN long p_ut;               ///< 'updatetime'
-EXTERN char_u *p_fcs;           ///< 'fillchar'
 EXTERN char_u *p_shada;         ///< 'shada'
 EXTERN char_u *p_vdir;          ///< 'viewdir'
 EXTERN char_u *p_vop;           ///< 'viewoptions'
@@ -660,6 +659,12 @@ extern char_u   *p_vfile;       /* 'verbosefile' */
 #endif
 EXTERN int p_warn;              // 'warn'
 EXTERN char_u   *p_wop;         // 'wildoptions'
+EXTERN unsigned wop_flags;
+# ifdef IN_OPTION_C
+static char *(p_wop_values[]) =  { "tagfile", "pum", NULL };
+#endif
+#define WOP_TAGFILE             0x01
+#define WOP_PUM                 0x02
 EXTERN long p_window;           // 'window'
 EXTERN char_u   *p_wak;         // 'winaltkeys'
 EXTERN char_u   *p_wig;         // 'wildignore'
@@ -813,6 +818,8 @@ enum {
   , WV_WRAP
   , WV_SCL
   , WV_WINHL
+  , WV_FCS
+  , WV_LCS
   , WV_COUNT        // must be the last one
 };
 

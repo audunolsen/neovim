@@ -51,29 +51,33 @@ describe("shell command :!", function()
   end)
 
   it("throttles shell-command output greater than ~10KB", function()
-    if os.getenv("TRAVIS") and helpers.os_name() == "osx" then
-      pending("[Unreliable on Travis macOS.]", function() end)
+    if helpers.skip_fragile(pending,
+        (os.getenv("TRAVIS") and helpers.os_name() == "osx")) then
       return
     end
-
-    screen.timeout = 20000  -- Avoid false failure on slow systems.
     child_session.feed_data(
-      ":!for i in $(seq 2 3000); do echo XXXXXXXXXX $i; done\n")
+      ":!for i in $(seq 2 30000); do echo XXXXXXXXXX $i; done\n")
 
     -- If we observe any line starting with a dot, then throttling occurred.
-    screen:expect("\n.", nil, nil, nil, true)
+    -- Avoid false failure on slow systems.
+    screen:expect{any="\n%.", timeout=20000}
 
     -- Final chunk of output should always be displayed, never skipped.
     -- (Throttling is non-deterministic, this test is merely a sanity check.)
     screen:expect([[
-      XXXXXXXXXX 2997                                   |
-      XXXXXXXXXX 2998                                   |
-      XXXXXXXXXX 2999                                   |
-      XXXXXXXXXX 3000                                   |
+      XXXXXXXXXX 29997                                  |
+      XXXXXXXXXX 29998                                  |
+      XXXXXXXXXX 29999                                  |
+      XXXXXXXXXX 30000                                  |
                                                         |
       {10:Press ENTER or type command to continue}{1: }          |
       {3:-- TERMINAL --}                                    |
-    ]])
+    ]], {
+      -- test/functional/helpers.lua defaults to background=light.
+      [1] = {reverse = true},
+      [3] = {bold = true},
+      [10] = {foreground = 2},
+    })
   end)
 end)
 
@@ -92,7 +96,7 @@ describe("shell command :!", function()
     eq(2, eval('1+1'))  -- Still alive?
   end)
 
-  it([[handles control codes]], function()
+  it('handles control codes', function()
     if iswin() then
       pending('missing printf', function() end)
       return
@@ -112,14 +116,14 @@ describe("shell command :!", function()
     -- Print BELL control code. #4338
     screen.bell = false
     feed([[:!printf '\007\007\007\007text'<CR>]])
-    screen:expect([[
+    screen:expect{grid=[[
       ~                                                 |
       :!printf '\007\007\007\007text'                   |
       text                                              |
       Press ENTER or type command to continue^           |
-    ]], nil, nil, function()
+    ]], condition=function()
       eq(true, screen.bell)
-    end)
+    end}
     feed([[<CR>]])
     -- Print BS control code.
     feed([[:echo system('printf ''\010\n''')<CR>]])
@@ -188,7 +192,7 @@ describe("shell command :!", function()
     it('handles binary and multibyte data', function()
       feed_command('!cat test/functional/fixtures/shell_data.txt')
       screen.bell = false
-      screen:expect([[
+      screen:expect{grid=[[
                                                              |
         {1:~                                                    }|
         {4:                                                     }|
@@ -199,9 +203,9 @@ describe("shell command :!", function()
         t       {2:<ff>}                                         |
                                                              |
         {3:Press ENTER or type command to continue}^              |
-    ]], nil, nil, function()
+      ]], condition=function()
         eq(true, screen.bell)
-      end)
+      end}
     end)
 
     it('handles multibyte sequences split over buffer boundaries', function()

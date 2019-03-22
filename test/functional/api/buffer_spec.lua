@@ -1,7 +1,9 @@
 local helpers = require('test.functional.helpers')(after_each)
+local Screen = require('test.functional.ui.screen')
 local clear, nvim, buffer = helpers.clear, helpers.nvim, helpers.buffer
 local curbuf, curwin, eq = helpers.curbuf, helpers.curwin, helpers.eq
 local curbufmeths, ok = helpers.curbufmeths, helpers.ok
+local meths = helpers.meths
 local funcs = helpers.funcs
 local request = helpers.request
 local exc_exec = helpers.exc_exec
@@ -11,6 +13,7 @@ local NIL = helpers.NIL
 local meth_pcall = helpers.meth_pcall
 local command = helpers.command
 local bufmeths = helpers.bufmeths
+local feed = helpers.feed
 
 describe('api/buf', function()
   before_each(clear)
@@ -21,8 +24,8 @@ describe('api/buf', function()
   end
 
 
-  describe('line_count, insert and del_line', function()
-    it('works', function()
+  describe('nvim_buf_set_lines, nvim_buf_line_count', function()
+    it('deprecated forms', function()
       eq(1, curbuf_depr('line_count'))
       curbuf_depr('insert', -1, {'line'})
       eq(2, curbuf_depr('line_count'))
@@ -67,7 +70,7 @@ describe('api/buf', function()
     end)
   end)
 
-  describe('{get,set,del}_line', function()
+  describe('deprecated: {get,set,del}_line', function()
     it('works', function()
       eq('', curbuf_depr('get_line', 0))
       curbuf_depr('set_line', 0, 'line1')
@@ -99,7 +102,7 @@ describe('api/buf', function()
     end)
   end)
 
-  describe('{get,set}_line_slice', function()
+  describe('deprecated: {get,set}_line_slice', function()
     it('get_line_slice: out-of-bounds returns empty array', function()
       curbuf_depr('set_line_slice', 0, 0, true, true, {'a', 'b', 'c'})
       eq({'a', 'b', 'c'}, curbuf_depr('get_line_slice', 0, 2, true, true)) --sanity
@@ -146,7 +149,7 @@ describe('api/buf', function()
     end)
   end)
 
-  describe('{get,set}_lines', function()
+  describe('nvim_buf_get_lines, nvim_buf_set_lines', function()
     local get_lines, set_lines = curbufmeths.get_lines, curbufmeths.set_lines
     local line_count = curbufmeths.line_count
 
@@ -269,7 +272,7 @@ describe('api/buf', function()
       eq({}, get_lines(-3, -4, true))
     end)
 
-    it('set_line_slice: out-of-bounds can extend past end', function()
+    it('set_lines: out-of-bounds can extend past end', function()
       set_lines(0, -1, true, {'a', 'b', 'c'})
       eq({'a', 'b', 'c'}, get_lines(0, -1, true)) --sanity
 
@@ -283,7 +286,7 @@ describe('api/buf', function()
       eq({'e', 'a', 'b', 'c', 'd'}, get_lines(0, -1, true))
     end)
 
-    it("set_line on alternate buffer does not access invalid line (E315)", function()
+    it("set_lines on alternate buffer does not access invalid line (E315)", function()
       feed_command('set hidden')
       insert('Initial file')
       command('enew')
@@ -299,9 +302,96 @@ describe('api/buf', function()
       local retval = exc_exec("call nvim_buf_set_lines(1, 0, 1, v:false, ['test'])")
       eq(0, retval)
     end)
+
+    it("set_lines of invisible buffer doesn't move cursor in current window", function()
+      local screen = Screen.new(20, 5)
+      screen:set_default_attr_ids({
+        [1] = {bold = true, foreground = Screen.colors.Blue1},
+        [2] = {bold = true},
+      })
+      screen:attach()
+
+      insert([[
+        Who would win?
+        A real window
+        with proper text]])
+      local buf = meths.create_buf(false,true)
+      screen:expect([[
+        Who would win?      |
+        A real window       |
+        with proper tex^t    |
+        {1:~                   }|
+                            |
+      ]])
+
+      meths.buf_set_lines(buf, 0, -1, true, {'or some', 'scratchy text'})
+      feed('i') -- provoke redraw
+      screen:expect([[
+        Who would win?      |
+        A real window       |
+        with proper tex^t    |
+        {1:~                   }|
+        {2:-- INSERT --}        |
+      ]])
+    end)
+
+    it('set_lines on hidden buffer preserves "previous window" #9741', function()
+      insert([[
+        visible buffer line 1
+        line 2
+      ]])
+      local hiddenbuf = meths.create_buf(false,true)
+      command('vsplit')
+      command('vsplit')
+      feed('<c-w>l<c-w>l<c-w>l')
+      eq(3, funcs.winnr())
+      feed('<c-w>h')
+      eq(2, funcs.winnr())
+      meths.buf_set_lines(hiddenbuf, 0, -1, true,
+                          {'hidden buffer line 1', 'line 2'})
+      feed('<c-w>p')
+      eq(3, funcs.winnr())
+    end)
   end)
 
-  describe('{get,set,del}_var', function()
+  describe('nvim_buf_get_offset', function()
+    local get_offset = curbufmeths.get_offset
+    it('works', function()
+      curbufmeths.set_lines(0,-1,true,{'Some\r','exa\000mple', '', 'buf\rfer', 'text'})
+      eq(5, curbufmeths.line_count())
+      eq(0, get_offset(0))
+      eq(6, get_offset(1))
+      eq(15, get_offset(2))
+      eq(16, get_offset(3))
+      eq(24, get_offset(4))
+      eq(29, get_offset(5))
+      eq({false,'Index out of bounds'}, meth_pcall(get_offset, 6))
+      eq({false,'Index out of bounds'}, meth_pcall(get_offset, -1))
+
+      curbufmeths.set_option('eol', false)
+      curbufmeths.set_option('fixeol', false)
+      eq(28, get_offset(5))
+
+      -- fileformat is ignored
+      curbufmeths.set_option('fileformat', 'dos')
+      eq(0, get_offset(0))
+      eq(6, get_offset(1))
+      eq(15, get_offset(2))
+      eq(16, get_offset(3))
+      eq(24, get_offset(4))
+      eq(28, get_offset(5))
+      curbufmeths.set_option('eol', true)
+      eq(29, get_offset(5))
+
+      command("set hidden")
+      command("enew")
+      eq(6, bufmeths.get_offset(1,1))
+      command("bunload! 1")
+      eq(-1, bufmeths.get_offset(1,1))
+    end)
+  end)
+
+  describe('nvim_buf_get_var, nvim_buf_set_var, nvim_buf_del_var', function()
     it('works', function()
       curbuf('set_var', 'lua', {1, 2, {['3'] = 1}})
       eq({1, 2, {['3'] = 1}}, curbuf('get_var', 'lua'))
@@ -309,7 +399,7 @@ describe('api/buf', function()
       eq(1, funcs.exists('b:lua'))
       curbufmeths.del_var('lua')
       eq(0, funcs.exists('b:lua'))
-      eq({false, 'Key does not exist: lua'}, meth_pcall(curbufmeths.del_var, 'lua'))
+      eq({false, 'Key not found: lua'}, meth_pcall(curbufmeths.del_var, 'lua'))
       curbufmeths.set_var('lua', 1)
       command('lockvar b:lua')
       eq({false, 'Key is locked: lua'}, meth_pcall(curbufmeths.del_var, 'lua'))
@@ -321,7 +411,7 @@ describe('api/buf', function()
     end)
   end)
 
-  describe('get_changedtick', function()
+  describe('nvim_buf_get_changedtick', function()
     it('works', function()
       eq(2, curbufmeths.get_changedtick())
       curbufmeths.set_lines(0, 1, false, {'abc\0', '\0def', 'ghi'})
@@ -345,7 +435,7 @@ describe('api/buf', function()
     end)
   end)
 
-  describe('{get,set}_option', function()
+  describe('nvim_buf_get_option, nvim_buf_set_option', function()
     it('works', function()
       eq(8, curbuf('get_option', 'shiftwidth'))
       curbuf('set_option', 'shiftwidth', 4)
@@ -358,7 +448,7 @@ describe('api/buf', function()
     end)
   end)
 
-  describe('{get,set}_name', function()
+  describe('nvim_buf_get_name, nvim_buf_set_name', function()
     it('works', function()
       nvim('command', 'new')
       eq('', curbuf('get_name'))
@@ -366,14 +456,12 @@ describe('api/buf', function()
       curbuf('set_name', new_name)
       eq(new_name, curbuf('get_name'))
       nvim('command', 'w!')
-      local f = io.open(new_name)
-      ok(f ~= nil)
-      f:close()
+      eq(1, funcs.filereadable(new_name))
       os.remove(new_name)
     end)
   end)
 
-  describe('is_loaded', function()
+  describe('nvim_buf_is_loaded', function()
     it('works', function()
       -- record our buffer number for when we unload it
       local bufnr = curbuf('get_number')
@@ -398,7 +486,7 @@ describe('api/buf', function()
     end)
   end)
 
-  describe('is_valid', function()
+  describe('nvim_buf_is_valid', function()
     it('works', function()
       nvim('command', 'new')
       local b = nvim('get_current_buf')
@@ -408,12 +496,12 @@ describe('api/buf', function()
     end)
   end)
 
-  describe('get_mark', function()
+  describe('nvim_buf_get_mark', function()
     it('works', function()
       curbuf('set_lines', -1, -1, true, {'a', 'bit of', 'text'})
       curwin('set_cursor', {3, 4})
-      nvim('command', 'mark V')
-      eq({3, 0}, curbuf('get_mark', 'V'))
+      nvim('command', 'mark v')
+      eq({3, 0}, curbuf('get_mark', 'v'))
     end)
   end)
 end)

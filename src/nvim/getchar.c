@@ -25,7 +25,6 @@
 #include "nvim/eval.h"
 #include "nvim/ex_docmd.h"
 #include "nvim/ex_getln.h"
-#include "nvim/farsi.h"
 #include "nvim/func_attr.h"
 #include "nvim/main.h"
 #include "nvim/mbyte.h"
@@ -315,7 +314,7 @@ static void add_char_buff(buffheader_T *buf, int c)
   if (IS_SPECIAL(c)) {
     len = 1;
   } else {
-    len = mb_char2bytes(c, bytes);
+    len = utf_char2bytes(c, bytes);
   }
 
   for (int i = 0; i < len; i++) {
@@ -420,7 +419,7 @@ void typeahead_noflush(int c)
  * typeahead buffer (used in case of an error).  If "flush_typeahead" is true,
  * flush all typeahead characters (used when interrupted by a CTRL-C).
  */
-void flush_buffers(int flush_typeahead)
+void flush_buffers(flush_buffers_T flush_typeahead)
 {
   init_typebuf();
 
@@ -428,24 +427,28 @@ void flush_buffers(int flush_typeahead)
   while (read_readbuffers(TRUE) != NUL) {
   }
 
-  if (flush_typeahead) {            /* remove all typeahead */
-    /*
-     * We have to get all characters, because we may delete the first part
-     * of an escape sequence.
-     * In an xterm we get one char at a time and we have to get them all.
-     */
-    while (inchar(typebuf.tb_buf, typebuf.tb_buflen - 1, 10L,
-               typebuf.tb_change_cnt) != 0)
-      ;
-    typebuf.tb_off = MAXMAPLEN;
-    typebuf.tb_len = 0;
-  } else {                /* remove mapped characters at the start only */
+  if (flush_typeahead == FLUSH_MINIMAL) {
+    // remove mapped characters at the start only
     typebuf.tb_off += typebuf.tb_maplen;
     typebuf.tb_len -= typebuf.tb_maplen;
+  } else {
+    // remove typeahead
+    if (flush_typeahead == FLUSH_INPUT) {
+      // We have to get all characters, because we may delete the first
+      // part of an escape sequence.  In an xterm we get one char at a
+      // time and we have to get them all.
+      while (inchar(typebuf.tb_buf, typebuf.tb_buflen - 1, 10L) != 0) {
+      }
+    }
+    typebuf.tb_off = MAXMAPLEN;
+    typebuf.tb_len = 0;
+    // Reset the flag that text received from a client or from feedkeys()
+    // was inserted in the typeahead buffer.
+    typebuf_was_filled = false;
   }
   typebuf.tb_maplen = 0;
   typebuf.tb_silent = 0;
-  cmd_silent = FALSE;
+  cmd_silent = false;
   typebuf.tb_no_abbr_cnt = 0;
 }
 
@@ -649,15 +652,13 @@ void stuffnumReadbuff(long n)
   add_num_buff(&readbuf1, n);
 }
 
-/*
- * Read a character from the redo buffer.  Translates K_SPECIAL, CSI and
- * multibyte characters.
- * The redo buffer is left as it is.
- * If init is TRUE, prepare for redo, return FAIL if nothing to redo, OK
- * otherwise.
- * If old is TRUE, use old_redobuff instead of redobuff.
- */
-static int read_redo(int init, int old_redo)
+// Read a character from the redo buffer.  Translates K_SPECIAL, CSI and
+// multibyte characters.
+// The redo buffer is left as it is.
+// If init is true, prepare for redo, return FAIL if nothing to redo, OK
+// otherwise.
+// If old_redo is true, use old_redobuff instead of redobuff.
+static int read_redo(bool init, bool old_redo)
 {
   static buffblock_T *bp;
   static char_u *p;
@@ -698,7 +699,7 @@ static int read_redo(int init, int old_redo)
     buf[i] = (char_u)c;
     if (i == n - 1) {         // last byte of a character
       if (n != 1) {
-        c = (*mb_ptr2char)(buf);
+        c = utf_ptr2char(buf);
       }
       break;
     }
@@ -710,38 +711,35 @@ static int read_redo(int init, int old_redo)
   return c;
 }
 
-/*
- * Copy the rest of the redo buffer into the stuff buffer (in a slow way).
- * If old_redo is TRUE, use old_redobuff instead of redobuff.
- * The escaped K_SPECIAL and CSI are copied without translation.
- */
-static void copy_redo(int old_redo)
+// Copy the rest of the redo buffer into the stuff buffer (in a slow way).
+// If old_redo is true, use old_redobuff instead of redobuff.
+// The escaped K_SPECIAL and CSI are copied without translation.
+static void copy_redo(bool old_redo)
 {
   int c;
 
-  while ((c = read_redo(FALSE, old_redo)) != NUL) {
+  while ((c = read_redo(false, old_redo)) != NUL) {
     add_char_buff(&readbuf2, c);
   }
 }
 
-/*
- * Stuff the redo buffer into readbuf2.
- * Insert the redo count into the command.
- * If "old_redo" is TRUE, the last but one command is repeated
- * instead of the last command (inserting text). This is used for
- * CTRL-O <.> in insert mode
- *
- * return FAIL for failure, OK otherwise
- */
-int start_redo(long count, int old_redo)
+// Stuff the redo buffer into readbuf2.
+// Insert the redo count into the command.
+// If "old_redo" is true, the last but one command is repeated
+// instead of the last command (inserting text). This is used for
+// CTRL-O <.> in insert mode
+//
+// return FAIL for failure, OK otherwise
+int start_redo(long count, bool old_redo)
 {
   int c;
 
-  /* init the pointers; return if nothing to redo */
-  if (read_redo(TRUE, old_redo) == FAIL)
+  // init the pointers; return if nothing to redo
+  if (read_redo(true, old_redo) == FAIL) {
     return FAIL;
+  }
 
-  c = read_redo(FALSE, old_redo);
+  c = read_redo(false, old_redo);
 
   /* copy the buffer name, if present */
   if (c == '"') {
@@ -752,22 +750,30 @@ int start_redo(long count, int old_redo)
     if (c >= '1' && c < '9')
       ++c;
     add_char_buff(&readbuf2, c);
-    c = read_redo(FALSE, old_redo);
+
+    // the expression register should be re-evaluated
+    if (c == '=') {
+      add_char_buff(&readbuf2, CAR);
+      cmd_silent = true;
+    }
+
+    c = read_redo(false, old_redo);
   }
 
   if (c == 'v') {   /* redo Visual */
     VIsual = curwin->w_cursor;
-    VIsual_active = TRUE;
-    VIsual_select = FALSE;
-    VIsual_reselect = TRUE;
-    redo_VIsual_busy = TRUE;
-    c = read_redo(FALSE, old_redo);
+    VIsual_active = true;
+    VIsual_select = false;
+    VIsual_reselect = true;
+    redo_VIsual_busy = true;
+    c = read_redo(false, old_redo);
   }
 
-  /* try to enter the count (in place of a previous count) */
+  // try to enter the count (in place of a previous count)
   if (count) {
-    while (ascii_isdigit(c))      /* skip "old" count */
-      c = read_redo(FALSE, old_redo);
+    while (ascii_isdigit(c)) {    // skip "old" count
+      c = read_redo(false, old_redo);
+    }
     add_num_buff(&readbuf2, count);
   }
 
@@ -786,12 +792,13 @@ int start_redo_ins(void)
 {
   int c;
 
-  if (read_redo(TRUE, FALSE) == FAIL)
+  if (read_redo(true, false) == FAIL) {
     return FAIL;
+  }
   start_stuff();
 
-  /* skip the count and the command character */
-  while ((c = read_redo(FALSE, FALSE)) != NUL) {
+  // skip the count and the command character
+  while ((c = read_redo(false, false)) != NUL) {
     if (vim_strchr((char_u *)"AaIiRrOo", c) != NULL) {
       if (c == 'O' || c == 'o') {
         add_buff(&readbuf2, NL_STR, -1L);
@@ -800,9 +807,9 @@ int start_redo_ins(void)
     }
   }
 
-  /* copy the typed text from the redo buffer into the stuff buffer */
-  copy_redo(FALSE);
-  block_redo = TRUE;
+  // copy the typed text from the redo buffer into the stuff buffer
+  copy_redo(false);
+  block_redo = true;
   return OK;
 }
 
@@ -949,7 +956,7 @@ int ins_typebuf(char_u *str, int noremap, int offset, int nottyped, bool silent)
     typebuf.tb_maplen += addlen;
   if (silent || typebuf.tb_silent > offset) {
     typebuf.tb_silent += addlen;
-    cmd_silent = TRUE;
+    cmd_silent = true;
   }
   if (typebuf.tb_no_abbr_cnt && offset == 0)    /* and not used for abbrev.s */
     typebuf.tb_no_abbr_cnt += addlen;
@@ -972,7 +979,7 @@ void ins_char_typebuf(int c)
     buf[2] = (char_u)K_THIRD(c);
     buf[3] = NUL;
   } else {
-    buf[(*mb_char2bytes)(c, buf)] = NUL;
+    buf[utf_char2bytes(c, buf)] = NUL;
   }
   (void)ins_typebuf(buf, KeyNoremap, 0, !KeyTyped, cmd_silent);
 }
@@ -1077,9 +1084,10 @@ void del_typebuf(int len, int offset)
 
   /* Reset the flag that text received from a client or from feedkeys()
    * was inserted in the typeahead buffer. */
-  typebuf_was_filled = FALSE;
-  if (++typebuf.tb_change_cnt == 0)
+  typebuf_was_filled = false;
+  if (++typebuf.tb_change_cnt == 0) {
     typebuf.tb_change_cnt = 1;
+  }
 }
 
 /*
@@ -1178,10 +1186,11 @@ void save_typebuf(void)
   alloc_typebuf();
 }
 
-static int old_char = -1;       /* character put back by vungetc() */
-static int old_mod_mask;        /* mod_mask for ungotten character */
-static int old_mouse_row;       /* mouse_row related to old_char */
-static int old_mouse_col;       /* mouse_col related to old_char */
+static int old_char = -1;   // character put back by vungetc()
+static int old_mod_mask;    // mod_mask for ungotten character
+static int old_mouse_grid;  // mouse_grid related to old_char
+static int old_mouse_row;   // mouse_row related to old_char
+static int old_mouse_col;   // mouse_col related to old_char
 
 
 /*
@@ -1382,6 +1391,7 @@ int vgetc(void)
     c = old_char;
     old_char = -1;
     mod_mask = old_mod_mask;
+    mouse_grid = old_mouse_grid;
     mouse_row = old_mouse_row;
     mouse_col = old_mouse_col;
   } else {
@@ -1482,7 +1492,7 @@ int vgetc(void)
           }
         }
         no_mapping--;
-        c = (*mb_ptr2char)(buf);
+        c = utf_ptr2char(buf);
       }
 
       break;
@@ -1531,6 +1541,7 @@ int plain_vgetc(void)
  * Check if a character is available, such that vgetc() will not block.
  * If the next character is a special character or multi-byte, the returned
  * character is not valid!.
+ * Returns NUL if no character is available.
  */
 int vpeekc(void)
 {
@@ -1575,6 +1586,7 @@ vungetc ( /* unget one character (can only be done once!) */
 {
   old_char = c;
   old_mod_mask = mod_mask;
+  old_mouse_grid = mouse_grid;
   old_mouse_row = mouse_row;
   old_mouse_col = mouse_col;
 }
@@ -1595,7 +1607,8 @@ vungetc ( /* unget one character (can only be done once!) */
 ///    KeyTyped is set to TRUE in the case the user typed the key.
 ///    KeyStuffed is TRUE if the character comes from the stuff buffer.
 /// if "advance" is FALSE (vpeekc()):
-///    just look whether there is a character available.
+///    Just look whether there is a character available.
+///    Return NUL if not.
 ///
 /// When `no_mapping` (global) is zero, checks for mappings in the current mode.
 /// Only returns one byte (of a multi-byte character).
@@ -1663,7 +1676,7 @@ static int vgetorpeek(int advance)
     }
     if (c != NUL && !got_int) {
       if (advance) {
-        // KeyTyped = FALSE;  When the command that stuffed something
+        // KeyTyped = false;  When the command that stuffed something
         // was typed, behave like the stuffed command was typed.
         // needed for CTRL-W CTRL-] to open a fold, for example.
         KeyStuffed = true;
@@ -1689,22 +1702,20 @@ static int vgetorpeek(int advance)
           os_breakcheck();                      /* check for CTRL-C */
         keylen = 0;
         if (got_int) {
-          /* flush all input */
-          c = inchar(typebuf.tb_buf, typebuf.tb_buflen - 1, 0L,
-              typebuf.tb_change_cnt);
-          /*
-           * If inchar() returns TRUE (script file was active) or we
-           * are inside a mapping, get out of insert mode.
-           * Otherwise we behave like having gotten a CTRL-C.
-           * As a result typing CTRL-C in insert mode will
-           * really insert a CTRL-C.
-           */
+          // flush all input
+          c = inchar(typebuf.tb_buf, typebuf.tb_buflen - 1, 0L);
+          // If inchar() returns TRUE (script file was active) or we
+          // are inside a mapping, get out of insert mode.
+          // Otherwise we behave like having gotten a CTRL-C.
+          // As a result typing CTRL-C in insert mode will
+          // really insert a CTRL-C.
           if ((c || typebuf.tb_maplen)
-              && (State & (INSERT + CMDLINE)))
+              && (State & (INSERT + CMDLINE))) {
             c = ESC;
-          else
+          } else {
             c = Ctrl_C;
-          flush_buffers(TRUE);                  /* flush all typeahead */
+          }
+          flush_buffers(FLUSH_INPUT);  // flush all typeahead
 
           if (advance) {
             /* Also record this character, it might be needed to
@@ -1712,7 +1723,7 @@ static int vgetorpeek(int advance)
             *typebuf.tb_buf = (char_u)c;
             gotchars(typebuf.tb_buf, 1);
           }
-          cmd_silent = FALSE;
+          cmd_silent = false;
 
           break;
         } else if (typebuf.tb_len > 0) {
@@ -1965,8 +1976,8 @@ static int vgetorpeek(int advance)
                 redrawcmdline();
               else
                 setcursor();
-              flush_buffers(FALSE);
-              mapdepth = 0;                     /* for next one */
+              flush_buffers(FLUSH_MINIMAL);
+              mapdepth = 0;                     // for next one
               c = -1;
               break;
             }
@@ -2067,18 +2078,17 @@ static int vgetorpeek(int advance)
         c = 0;
         new_wcol = curwin->w_wcol;
         new_wrow = curwin->w_wrow;
-        if (       advance
-                   && typebuf.tb_len == 1
-                   && typebuf.tb_buf[typebuf.tb_off] == ESC
-                   && !no_mapping
-                   && ex_normal_busy == 0
-                   && typebuf.tb_maplen == 0
-                   && (State & INSERT)
-                   && (p_timeout
-                       || (keylen == KEYLEN_PART_KEY && p_ttimeout))
-                   && (c = inchar(typebuf.tb_buf + typebuf.tb_off
-                           + typebuf.tb_len, 3, 25L,
-                           typebuf.tb_change_cnt)) == 0) {
+        if (advance
+            && typebuf.tb_len == 1
+            && typebuf.tb_buf[typebuf.tb_off] == ESC
+            && !no_mapping
+            && ex_normal_busy == 0
+            && typebuf.tb_maplen == 0
+            && (State & INSERT)
+            && (p_timeout
+                || (keylen == KEYLEN_PART_KEY && p_ttimeout))
+            && (c = inchar(typebuf.tb_buf + typebuf.tb_off + typebuf.tb_len,
+                           3, 25L)) == 0) {
           colnr_T col = 0, vcol;
           char_u      *ptr;
 
@@ -2112,8 +2122,8 @@ static int vgetorpeek(int advance)
                     ++col;
                 }
                 curwin->w_wrow = curwin->w_cline_row
-                                 + curwin->w_wcol / curwin->w_width;
-                curwin->w_wcol %= curwin->w_width;
+                                 + curwin->w_wcol / curwin->w_width_inner;
+                curwin->w_wcol %= curwin->w_width_inner;
                 curwin->w_wcol += curwin_col_off();
                 col = 0;                        /* no correction needed */
               } else {
@@ -2121,17 +2131,18 @@ static int vgetorpeek(int advance)
                 col = curwin->w_cursor.col - 1;
               }
             } else if (curwin->w_p_wrap && curwin->w_wrow) {
-              --curwin->w_wrow;
-              curwin->w_wcol = curwin->w_width - 1;
+              curwin->w_wrow--;
+              curwin->w_wcol = curwin->w_width_inner - 1;
               col = curwin->w_cursor.col - 1;
             }
-            if (has_mbyte && col > 0 && curwin->w_wcol > 0) {
-              /* Correct when the cursor is on the right halve
-               * of a double-wide character. */
+            if (col > 0 && curwin->w_wcol > 0) {
+              // Correct when the cursor is on the right halve
+              // of a double-wide character.
               ptr = get_cursor_line_ptr();
-              col -= (*mb_head_off)(ptr, ptr + col);
-              if ((*mb_ptr2cells)(ptr + col) > 1)
-                --curwin->w_wcol;
+              col -= utf_head_off(ptr, ptr + col);
+              if (utf_ptr2cells(ptr + col) > 1) {
+                curwin->w_wcol--;
+              }
             }
           }
           setcursor();
@@ -2249,6 +2260,11 @@ static int vgetorpeek(int advance)
         /*
          * get a character: 3. from the user - get it
          */
+        if (typebuf.tb_len == 0) {
+          // timedout may have been set while waiting for a mapping
+          // that has a <Nop> RHS.
+          timedout = false;
+        }
         wait_tb_len = typebuf.tb_len;
         c = inchar(typebuf.tb_buf + typebuf.tb_off + typebuf.tb_len,
             typebuf.tb_buflen - typebuf.tb_off - typebuf.tb_len - 1,
@@ -2260,7 +2276,7 @@ static int vgetorpeek(int advance)
                ? -1L
                : ((keylen == KEYLEN_PART_KEY && p_ttm >= 0)
                   ? p_ttm
-                  : p_tm)), typebuf.tb_change_cnt);
+                  : p_tm)));
 
         if (i != 0)
           pop_showcmd();
@@ -2341,16 +2357,15 @@ static int vgetorpeek(int advance)
  *  Return the number of obtained characters.
  *  Return -1 when end of input script reached.
  */
-int 
-inchar (
+int inchar(
     char_u *buf,
     int maxlen,
-    long wait_time,                     /* milli seconds */
-    int tb_change_cnt
+    long wait_time                      // milli seconds
 )
 {
   int len = 0;  // Init for GCC.
   int retesc = false;  // Return ESC with gotint.
+  const int tb_change_cnt = typebuf.tb_change_cnt;
 
   if (wait_time == -1L || wait_time > 100L) {
     // flush output before waiting
@@ -2421,8 +2436,17 @@ inchar (
     len = os_inchar(buf, maxlen / 3, (int)wait_time, tb_change_cnt);
   }
 
+  // If the typebuf was changed further down, it is like nothing was added by
+  // this call.
   if (typebuf_changed(tb_change_cnt)) {
     return 0;
+  }
+
+  // Note the change in the typeahead buffer, this matters for when
+  // vgetorpeek() is called recursively, e.g. using getchar(1) in a timer
+  // function.
+  if (len > 0 && ++typebuf.tb_change_cnt == 0) {
+    typebuf.tb_change_cnt = 1;
   }
 
   return fix_input_buffer(buf, len);
@@ -2664,16 +2688,9 @@ do_map (
     }
   }
 
-  /*
-   * When in right-to-left mode and alternate keymap option set,
-   * reverse the character flow in the rhs in Farsi.
-   */
-  if (p_altkeymap && curwin->w_p_rl)
-    lrswap(rhs);
-
-  /*
-   * check arguments and translate function keys
-   */
+  //
+  // check arguments and translate function keys
+  //
   if (haskey) {
     len = (int)STRLEN(keys);
     if (len > MAXMAPLEN) {              /* maximum length of MAXMAPLEN chars */
@@ -3637,16 +3654,14 @@ int check_abbr(int c, char_u *ptr, int col, int mincol)
           tb[j++] = (char_u)K_SECOND(c);
           tb[j++] = (char_u)K_THIRD(c);
         } else {
-          if (c < ABBR_OFF && (c < ' ' || c > '~'))
-            tb[j++] = Ctrl_V;                   /* special char needs CTRL-V */
-          if (has_mbyte) {
-            /* if ABBR_OFF has been added, remove it here */
-            if (c >= ABBR_OFF)
-              c -= ABBR_OFF;
-            j += (*mb_char2bytes)(c, tb + j);
-          } else {
-            tb[j++] = (char_u)c;
+          if (c < ABBR_OFF && (c < ' ' || c > '~')) {
+            tb[j++] = Ctrl_V;                   // special char needs CTRL-V
           }
+          // if ABBR_OFF has been added, remove it here.
+          if (c >= ABBR_OFF) {
+            c -= ABBR_OFF;
+          }
+          j += utf_char2bytes(c, tb + j);
         }
         tb[j] = NUL;
         /* insert the last typed char */
@@ -4299,8 +4314,14 @@ char_u * getcmdkeycmd(int promptc, void *cookie, int indent)
       EMSG(e_cmdmap_repeated);
       aborted = true;
     } else if (IS_SPECIAL(c1)) {
-      EMSG2(e_cmdmap_key, get_special_key_name(c1, cmod));
-      aborted = true;
+      if (c1 == K_SNR) {
+        ga_append(&line_ga, (char)K_SPECIAL);
+        ga_append(&line_ga, (char)KS_EXTRA);
+        ga_append(&line_ga, (char)KE_SNR);
+      } else {
+        EMSG2(e_cmdmap_key, get_special_key_name(c1, cmod));
+        aborted = true;
+      }
     } else {
       ga_append(&line_ga, (char)c1);
     }

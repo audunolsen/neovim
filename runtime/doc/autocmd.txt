@@ -4,7 +4,7 @@
 		  VIM REFERENCE MANUAL    by Bram Moolenaar
 
 
-Automatic commands					*autocommand*
+Automatic commands					*autocmd* *autocommand*
 
 For a basic explanation, see section |40.3| in the user manual.
 
@@ -20,7 +20,7 @@ files matching *.c.  You can also use autocommands to implement advanced
 features, such as editing compressed files (see |gzip-example|).  The usual
 place to put autocommands is in your vimrc file.
 
-					*E203* *E204* *E143* *E855* *E937*
+				*E203* *E204* *E143* *E855* *E937* *E952*
 WARNING: Using autocommands is very powerful, and may lead to unexpected side
 effects.  Be careful not to destroy your text.
 - It's a good idea to do some testing on an expendable copy of a file first.
@@ -40,13 +40,18 @@ effects.  Be careful not to destroy your text.
 2. Defining autocommands				*autocmd-define*
 
 							*:au* *:autocmd*
-:au[tocmd] [group] {event} {pat} [nested] {cmd}
+:au[tocmd] [group] {event} {pat} [++once] [++nested] {cmd}
 			Add {cmd} to the list of commands that Vim will
 			execute automatically on {event} for a file matching
 			{pat} |autocmd-patterns|.
-			Vim always adds the {cmd} after existing autocommands,
-			so that the autocommands execute in the order in which
-			they were given.  See |autocmd-nested| for [nested].
+			Note: A quote character is seen as argument to the
+			:autocmd and won't start a comment.
+			Nvim always adds {cmd} after existing autocommands so
+			they execute in the order in which they were defined.
+			See |autocmd-nested| for [++nested].
+							*autocmd-once*
+			If [++once] is supplied the command is executed once,
+			then removed ("one shot").
 
 The special pattern <buffer> or <buffer=N> defines a buffer-local autocommand.
 See |autocmd-buflocal|.
@@ -79,7 +84,8 @@ will appear twice.  To avoid this, define your autocommands in a group, so
 that you can easily clear them: >
 
 	augroup vimrc
-	  autocmd!	" Remove all vimrc autocommands
+	  " Remove all vimrc autocommands
+	  autocmd!
 	  au BufNewFile,BufRead *.html so <sfile>:h/html.vim
 	augroup END
 
@@ -113,10 +119,11 @@ prompt.  When one command outputs two messages this can happen anyway.
 ==============================================================================
 3. Removing autocommands				*autocmd-remove*
 
-:au[tocmd]! [group] {event} {pat} [nested] {cmd}
+:au[tocmd]! [group] {event} {pat} [++once] [++nested] {cmd}
 			Remove all autocommands associated with {event} and
-			{pat}, and add the command {cmd}.  See
-			|autocmd-nested| for [nested].
+			{pat}, and add the command {cmd}.
+			See |autocmd-once| for [++once].
+			See |autocmd-nested| for [++nested].
 
 :au[tocmd]! [group] {event} {pat}
 			Remove all autocommands associated with {event} and
@@ -133,6 +140,8 @@ prompt.  When one command outputs two messages this can happen anyway.
 			plugins, syntax highlighting, etc.
 
 :au[tocmd]! [group]	Remove ALL autocommands.
+			Note: a quote will be seen as argument to the :autocmd
+			and won't start a comment.
 			Warning: You should normally not do this without a
 			group, it breaks plugins, syntax highlighting, etc.
 
@@ -273,14 +282,16 @@ Name			triggered by ~
 |VimEnter|		after doing all the startup stuff
 |GUIEnter|		after starting the GUI successfully
 |GUIFailed|		after starting the GUI failed
-|TermResponse|		after the terminal response to |t_RV| is received
-|QuitPre|		when using `:quit`, before deciding whether to quit
+|TermResponse|		after the terminal response to t_RV is received
+|QuitPre|		when using `:quit`, before deciding whether to exit
+|ExitPre|		when using a command that may make Vim exit
 |VimLeavePre|		before exiting Nvim, before writing the shada file
 |VimLeave|		before exiting Nvim, after writing the shada file
 |VimResume|		after Nvim is resumed
 |VimSuspend|		before Nvim is suspended
 
 	Various
+|DiffUpdated|		after diffs have been updated
 |DirChanged|		after the |current-directory| was changed
 
 |FileChangedShell|	Vim notices that a file changed since editing started
@@ -312,6 +323,7 @@ Name			triggered by ~
 |TabNew|		when creating a new tab page
 |TabNewEntered|		after entering a new tab page
 |TabClosed|		after closing a tab page
+|CmdlineChanged|	after a change was made to the command-line text
 |CmdlineEnter|		after entering cmdline mode
 |CmdlineLeave|		before leaving cmdline mode
 |CmdwinEnter|		after entering the command-line window
@@ -331,6 +343,7 @@ Name			triggered by ~
 |TextChangedP|		after a change was made to the text in Insert mode
 			when popup menu visible
 
+|ColorSchemePre|	before loading a color scheme
 |ColorScheme|		after loading a color scheme
 
 |RemoteReply|		a reply from a server Vim was received
@@ -341,9 +354,12 @@ Name			triggered by ~
 |SessionLoadPost|	after loading a session file
 
 |MenuPopup|		just before showing the popup menu
+|MenuPopupChanged|	after popup menu changed, not fired on popup menu hide
 |CompleteDone|		after Insert mode completion is done
 
 |User|			to be used in combination with ":doautocmd"
+|Signal|		after the nvim process received a signal
+
 
 
 The alphabetical list of autocommand events:		*autocmd-events-abc*
@@ -494,14 +510,14 @@ ChanInfo			State of channel changed, for instance the
 				client of a RPC channel described itself.
 				Sets these |v:event| keys:
 				    info
-				See |nvim_get_chan_info| for the format of the
-				info Dictionary.
+				See |nvim_get_chan_info()| for the format of
+				the info Dictionary.
 							*ChanOpen*
 ChanOpen			Just after a channel was opened.
 				Sets these |v:event| keys:
 				    info
-				See |nvim_get_chan_info| for the format of the
-				info Dictionary.
+				See |nvim_get_chan_info()| for the format of
+				the info Dictionary.
 							*CmdUndefined*
 CmdUndefined			When a user command is used but it isn't
 				defined.  Useful for defining a command only
@@ -512,21 +528,24 @@ CmdUndefined			When a user command is used but it isn't
 				command is defined.  An alternative is to
 				always define the user command and have it
 				invoke an autoloaded function.  See |autoload|.
+							*CmdlineChanged*
+CmdlineChanged			After a change was made to the text inside
+				command line.  Be careful not to mess up the
+				command line, it may cause Vim to lock up.
+				<afile> is set to the |cmdline-char|.
 							*CmdlineEnter*
-CmdlineEnter			After moving the cursor to the command line,
-				where the user can type a command or search
-				string.
-				<afile> is set to a single character,
-				indicating the type of command-line.
-				|cmdline-char|
+CmdlineEnter			After entering the command-line (including
+				non-interactive use of ":" in a mapping: use
+				|<Cmd>| instead to avoid this).
+				<afile> is set to the |cmdline-char|.
 				Sets these |v:event| keys:
 				    cmdlevel
 				    cmdtype
 							*CmdlineLeave*
-CmdlineLeave			Before leaving the command line.
-				<afile> is set to a single character,
-				indicating the type of command-line.
-				|cmdline-char|
+CmdlineLeave			Before leaving the command-line (including
+				non-interactive use of ":" in a mapping: use
+				|<Cmd>| instead to avoid this).
+				<afile> is set to the |cmdline-char|.
 				Sets these |v:event| keys:
 				    abort (mutable)
 				    cmdlevel
@@ -558,6 +577,10 @@ ColorScheme			After loading a color scheme. |:colorscheme|
 				set, and <amatch> for the new colorscheme
 				name.
 
+							*ColorSchemePre*
+ColorSchemePre			Before loading a color scheme. |:colorscheme|
+				Useful to setup removing things added by a
+				color scheme, before another one is loaded.
 
 							*CompleteDone*
 CompleteDone			After Insert mode completion is done.  Either
@@ -613,6 +636,11 @@ CursorMoved			After the cursor was moved in Normal or Visual
 CursorMovedI			After the cursor was moved in Insert mode.
 				Not triggered when the popup menu is visible.
 				Otherwise the same as CursorMoved.
+							*DiffUpdated*
+DiffUpdated			After diffs have been updated.  Depending on
+				what kind of diff is being used (internal or
+				external) this can be triggered on every
+				change or when doing |:diffupdate|.
 							*DirChanged*
 DirChanged			After the |current-directory| was changed.
 				Sets these |v:event| keys:
@@ -646,6 +674,14 @@ FileChangedRO			Before making the first change to a read-only
 							*E881*
 				If the number of lines changes saving for undo
 				may fail and the change will be aborted.
+							*ExitPre*
+ExitPre				When using `:quit`, `:wq` in a way it makes
+				Vim exit, or using `:qall`, just after
+				|QuitPre|.  Can be used to close any
+				non-essential window.  Exiting may still be
+				cancelled if there is a modified buffer that
+				isn't automatically saved, use |VimLeavePre|
+				for really exiting.
 							*FileChangedShell*
 FileChangedShell		When Vim notices that the modification time of
 				a file has changed since editing started.
@@ -774,20 +810,25 @@ InsertCharPre			When a character is typed in Insert mode,
 				a different character.  When |v:char| is set
 				to more than one character this text is
 				inserted literally.
-				It is not allowed to change the text |textlock|.
-				The event is not triggered when 'paste' is
-				set.
+
+				Cannot change the text. |textlock|
+				Not triggered when 'paste' is set.
 							*TextYankPost*
 TextYankPost			Just after a |yank| or |deleting| command, but not
 				if the black hole register |quote_| is used nor
 				for |setreg()|. Pattern must be *.
 				Sets these |v:event| keys:
+				    inclusive
 				    operator
 				    regcontents
 				    regname
 				    regtype
+				The `inclusive` flag combined with the |'[|
+				and |']| marks can be used to calculate the
+				precise region of the operation.
+
 				Recursion is ignored.
-				It is not allowed to change the text |textlock|.
+				Cannot change the text. |textlock|
 							*InsertEnter*
 InsertEnter			Just before starting Insert mode.  Also for
 				Replace mode and Virtual Replace mode.  The
@@ -812,6 +853,22 @@ MenuPopup			Just before showing the popup menu (under the
 					o	Operator-pending
 					i	Insert
 					c	Command line
+MenuPopupChanged 					*MenuPopupChanged*
+				After each time popup menu changed, not fired
+				on popup menu hide, use |CompleteDone| for popup
+				menu hide.
+
+				Sets these |v:event| keys:
+				    completed_item
+				    height
+				    width
+				    row
+				    col
+				    size
+				    scrollbar
+
+				It is not allowed to change the text |textlock|.
+
 							*OptionSet*
 OptionSet			After setting an option.  The pattern is
 				matched against the long option name.
@@ -831,6 +888,9 @@ OptionSet			After setting an option.  The pattern is
 				during this autocommand, this may break a
 				plugin. You can always use `:noa` to prevent
 				triggering this autocommand.
+
+				When using |:set| in the autocommand the event
+				is not triggered again.
 
 							*QuickFixCmdPre*
 QuickFixCmdPre			Before a quickfix command is run (|:make|,
@@ -862,6 +922,7 @@ QuitPre				When using `:quit`, `:wq` or `:qall`, before
 				or quits Vim.  Can be used to close any
 				non-essential window if the current window is
 				the last ordinary window.
+				Also see |ExitPre|.
 							*RemoteReply*
 RemoteReply			When a reply from a Vim that functions as
 				server was received |server2client()|.  The
@@ -881,6 +942,10 @@ ShellCmdPost			After executing a shell command with |:!cmd|,
 				any changed files.
 				For non-blocking shell commands, see
 				|job-control|.
+							*Signal*
+Signal				After the nvim process received a signal.
+				The pattern is matched against the name of the
+				received signal. Only "SIGUSR1" is supported.
 							*ShellFilterPost*
 ShellFilterPost			After executing a shell command with
 				":{range}!cmd", ":w !cmd" or ":r !cmd".
@@ -959,7 +1024,7 @@ TermClose			When a |terminal| job ends.
 TermOpen			When a |terminal| job is starting.  Can be
 				used to configure the terminal buffer.
 							*TermResponse*
-TermResponse			After the response to |t_RV| is received from
+TermResponse			After the response to t_RV is received from
 				the terminal.  The value of |v:termresponse|
 				can be used to do things depending on the
 				terminal version.  Note that this event may be
@@ -989,6 +1054,10 @@ TextChangedP			After a change was made to the text in the
 User				Never executed automatically.  To be used for
 				autocommands that are only executed with
 				":doautocmd".
+				Note that when `:doautocmd User MyEvent` is
+				used while there are no matching autocommands,
+				you will get an error.  If you don't want
+				that, define a dummy autocommand yourself.
 							*UserGettingBored*
 UserGettingBored		When the user presses the same key 42 times.
 				Just kidding! :-)
@@ -1037,9 +1106,10 @@ WinEnter			After entering another window.  Not done for
 				If the window is for another buffer, Vim
 				executes the BufEnter autocommands after the
 				WinEnter autocommands.
-				Note: When using ":split fname" the WinEnter
-				event is triggered after the split but before
-				the file "fname" is loaded.
+				Note: For split and tabpage commands the
+				WinEnter event is triggered after the split
+				or tab command but before the file is loaded.
+
 							*WinLeave*
 WinLeave			Before leaving a window.  If the window to be
 				entered next is for a different buffer, Vim
@@ -1278,8 +1348,7 @@ option will not cause any commands to be executed.
 			another extension.  Example: >
 				:au BufEnter *.cpp so ~/.config/nvim/init_cpp.vim
 				:au BufEnter *.cpp doau BufEnter x.c
-<			Be careful to avoid endless loops.  See
-			|autocmd-nested|.
+<			Be careful to avoid endless loops.  |autocmd-nested|
 
 			When the [group] argument is not given, Vim executes
 			the autocommands for all groups.  When the [group]
@@ -1349,7 +1418,7 @@ Careful: '[ and '] change when using commands that change the buffer.
 In commands which expect a file name, you can use "<afile>" for the file name
 that is being read |:<afile>| (you can also use "%" for the current file
 name).  "<abuf>" can be used for the buffer number of the currently effective
-buffer.  This also works for buffers that doesn't have a name.  But it doesn't
+buffer.  This also works for buffers that don't have a name.  But it doesn't
 work for files without a buffer (e.g., with ":r file").
 
 							*gzip-example*
@@ -1394,9 +1463,9 @@ instead of ":q!".
 							*autocmd-nested* *E218*
 By default, autocommands do not nest.  If you use ":e" or ":w" in an
 autocommand, Vim does not execute the BufRead and BufWrite autocommands for
-those commands.  If you do want this, use the "nested" flag for those commands
-in which you want nesting.  For example: >
-  :autocmd FileChangedShell *.c nested e!
+those commands.  If you do want this, use the "++nested" flag for those
+commands in which you want nesting.  For example: >
+  :autocmd FileChangedShell *.c ++nested e!
 The nesting is limited to 10 levels to get out of recursive loops.
 
 It's possible to use the ":au" command in an autocommand.  This can be a

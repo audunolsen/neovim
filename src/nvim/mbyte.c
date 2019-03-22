@@ -4,9 +4,8 @@
 /// mbyte.c: Code specifically for handling multi-byte characters.
 /// Multibyte extensions partly by Sung-Hoon Baek
 ///
-/// The encoding used in nvim is always UTF-8. "enc_utf8" and "has_mbyte" is
-/// thus always true. "enc_dbcs" is always zero. The 'encoding' option is
-/// read-only and always reads "utf-8".
+/// Strings internal to Nvim are always encoded as UTF-8 (thus the legacy
+/// 'encoding' option is always "utf-8").
 ///
 /// The cell width on the display needs to be determined from the character
 /// value. Recognizing UTF-8 bytes is easy: 0xxx.xxxx is a single-byte char,
@@ -550,23 +549,36 @@ size_t mb_string2cells(const char_u *str)
   size_t clen = 0;
 
   for (const char_u *p = str; *p != NUL; p += (*mb_ptr2len)(p)) {
-    clen += (*mb_ptr2cells)(p);
+    clen += utf_ptr2cells(p);
   }
 
   return clen;
 }
 
-/// Return number of display cells for char at ScreenLines[off].
-/// We make sure that the offset used is less than "max_off".
-int utf_off2cells(unsigned off, unsigned max_off)
+/// Get the number of cells occupied by string `str` with maximum length `size`
+///
+/// @param str The source string, may not be NULL, must be a NUL-terminated
+///            string.
+/// @param size maximum length of string. It will terminate on earlier NUL.
+/// @return The number of cells occupied by string `str`
+size_t mb_string2cells_len(const char_u *str, size_t size)
 {
-  return (off + 1 < max_off && ScreenLines[off + 1][0] == 0) ? 2 : 1;
+  size_t clen = 0;
+
+  for (const char_u *p = str; *p != NUL && p < str+size;
+       p += utf_ptr2len_len(p, size+(p-str))) {
+    clen += utf_ptr2cells(p);
+  }
+
+  return clen;
 }
 
 /// Convert a UTF-8 byte sequence to a wide character
 ///
 /// If the sequence is illegal or truncated by a NUL then the first byte is
-/// returned. Does not include composing characters for obvious reasons.
+/// returned.
+/// For an overlong sequence this may return zero.
+/// Does not include composing characters for obvious reasons.
 ///
 /// @param[in]  p  String to convert.
 ///
@@ -674,7 +686,7 @@ int mb_ptr2char_adv(const char_u **const pp)
 {
   int c;
 
-  c = (*mb_ptr2char)(*pp);
+  c = utf_ptr2char(*pp);
   *pp += (*mb_ptr2len)(*pp);
   return c;
 }
@@ -687,7 +699,7 @@ int mb_cptr2char_adv(const char_u **pp)
 {
   int c;
 
-  c = (*mb_ptr2char)(*pp);
+  c = utf_ptr2char(*pp);
   *pp += utf_ptr2len(*pp);
   return c;
 }
@@ -1380,6 +1392,7 @@ int utf8_to_utf16(const char *str, wchar_t **strw)
 int utf16_to_utf8(const wchar_t *strw, char **str)
   FUNC_ATTR_NONNULL_ALL
 {
+  *str = NULL;
   // Compute the space required to store the string as UTF-8.
   DWORD utf8_len = WideCharToMultiByte(CP_UTF8,
                                        0,
@@ -1405,7 +1418,7 @@ int utf16_to_utf8(const wchar_t *strw, char **str)
                                  NULL,
                                  NULL);
   if (utf8_len == 0) {
-    free(*str);
+    xfree(*str);
     *str = NULL;
     return GetLastError();
   }
@@ -1708,13 +1721,13 @@ void mb_check_adjust_col(void *win_)
         win->w_cursor.col = len - 1;
       }
       // Move the cursor to the head byte.
-      win->w_cursor.col -= (*mb_head_off)(p, p + win->w_cursor.col);
+      win->w_cursor.col -= utf_head_off(p, p + win->w_cursor.col);
     }
 
     // Reset `coladd` when the cursor would be on the right half of a
     // double-wide character.
     if (win->w_cursor.coladd == 1 && p[win->w_cursor.col] != TAB
-        && vim_isprintc((*mb_ptr2char)(p + win->w_cursor.col))
+        && vim_isprintc(utf_ptr2char(p + win->w_cursor.col))
         && ptr2cells(p + win->w_cursor.col) > 1) {
       win->w_cursor.coladd = 0;
     }
@@ -1818,32 +1831,6 @@ const char *mb_unescape(const char **const pp)
     }
   }
   return NULL;
-}
-
-/*
- * Return true if the character at "row"/"col" on the screen is the left side
- * of a double-width character.
- * Caller must make sure "row" and "col" are not invalid!
- */
-bool mb_lefthalve(int row, int col)
-{
-  return (*mb_off2cells)(LineOffset[row] + col,
-      LineOffset[row] + screen_Columns) > 1;
-}
-
-/*
- * Correct a position on the screen, if it's the right half of a double-wide
- * char move it to the left half.  Returns the corrected column.
- */
-int mb_fix_col(int col, int row)
-{
-  col = check_col(col);
-  row = check_row(row);
-  if (ScreenLines != NULL && col > 0
-      && ScreenLines[LineOffset[row] + col][0] == 0) {
-    return col - 1;
-  }
-  return col;
 }
 
 
@@ -2122,8 +2109,9 @@ static char_u *iconv_string(const vimconv_T *const vcp, char_u *str,
        * conversion from 'encoding' to something else.  In other
        * situations we don't know what to skip anyway. */
       *to++ = '?';
-      if ((*mb_ptr2cells)((char_u *)from) > 1)
+      if (utf_ptr2cells((char_u *)from) > 1) {
         *to++ = '?';
+      }
       l = utfc_ptr2len_len((const char_u *)from, (int)fromlen);
       from += l;
       fromlen -= l;
@@ -2520,24 +2508,4 @@ char_u * string_convert_ext(const vimconv_T *const vcp, char_u *ptr,
   }
 
   return retval;
-}
-
-// Check bounds for column number
-static int check_col(int col)
-{
-  if (col < 0)
-    return 0;
-  if (col >= screen_Columns)
-    return screen_Columns - 1;
-  return col;
-}
-
-// Check bounds for row number
-static int check_row(int row)
-{
-  if (row < 0)
-    return 0;
-  if (row >= screen_Rows)
-    return screen_Rows - 1;
-  return row;
 }
