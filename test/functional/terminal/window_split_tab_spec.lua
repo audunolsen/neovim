@@ -37,7 +37,6 @@ describe(':terminal', function()
   end)
 
   it('does not change size on WinEnter', function()
-    if helpers.pending_win32(pending) then return end
     feed('<c-\\><c-n>')
     feed('k')
     feed_command('2split')
@@ -69,7 +68,7 @@ describe(':terminal', function()
   end)
 
   it('forwards resize request to the program', function()
-    feed([[<C-\><C-N>G:]])  -- Go to cmdline-mode, so cursor is at bottom.
+    feed([[<C-\><C-N>G]])
     local w1, h1 = screen._width - 3, screen._height - 2
     local w2, h2 = w1 - 6, h1 - 3
 
@@ -92,16 +91,16 @@ describe(':terminal', function()
                                                      |
                                                      |
                                                      |
+      ^                                               |
                                                      |
-      :^                                              |
     ]])
     screen:try_resize(w2, h2)
     screen:expect([[
       tty ready                                |
       rows: 7, cols: 47                        |
       rows: 4, cols: 41                        |
-      {2: }                                        |
-      :^                                        |
+      {2:^ }                                        |
+                                               |
     ]])
   end)
 end)

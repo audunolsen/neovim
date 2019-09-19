@@ -3,10 +3,7 @@
 
 submit_coverage() {
   if [ -n "${GCOV}" ]; then
-    if curl --fail --output codecov.bash --silent https://codecov.io/bash; then
-      bash codecov.bash -c -F "$1" || echo "codecov upload failed."
-      rm -f codecov.bash
-    fi
+    "${CI_DIR}/common/submit_coverage.sh" "$@" || echo 'codecov upload failed.'
   fi
 }
 
@@ -32,11 +29,12 @@ check_core_dumps() {
     shift
   fi
   local app="${1:-${BUILD_DIR}/bin/nvim}"
+  local cores
   if test "${TRAVIS_OS_NAME}" = osx ; then
-    local cores="$(find /cores/ -type f -print)"
+    cores="$(find /cores/ -type f -print)"
     local _sudo='sudo'
   else
-    local cores="$(find ./ -type f -name 'core.*' -print)"
+    cores="$(find ./ -type f -name 'core.*' -print)"
     local _sudo=
   fi
 
@@ -71,6 +69,7 @@ check_logs() {
   for log in $(find "${1}" -type f -name "${2}" -size +0); do
     cat "${log}"
     err=1
+    rm "${log}"
   done
   if test -n "${err}" ; then
     fail 'logs' E 'Runtime errors detected.'
@@ -81,9 +80,9 @@ valgrind_check() {
   check_logs "${1}" "valgrind-*"
 }
 
-asan_check() {
-  if test "${CLANG_SANITIZER}" = "ASAN_UBSAN" ; then
-    check_logs "${1}" "*san.*" | $ASAN_SYMBOLIZE
+check_sanitizer() {
+  if test -n "${CLANG_SANITIZER}"; then
+    check_logs "${1}" "*san.*"
   fi
 }
 
@@ -94,7 +93,7 @@ run_unittests() {(
     fail 'unittests' F 'Unit tests failed'
   fi
   submit_coverage unittest
-  check_core_dumps "$(which luajit)"
+  check_core_dumps "$(command -v luajit)"
   exit_suite
 )}
 
@@ -105,7 +104,7 @@ run_functionaltests() {(
     fail 'functionaltests' F 'Functional tests failed'
   fi
   submit_coverage functionaltest
-  asan_check "${LOG_DIR}"
+  check_sanitizer "${LOG_DIR}"
   valgrind_check "${LOG_DIR}"
   check_core_dumps
   exit_suite
@@ -114,12 +113,12 @@ run_functionaltests() {(
 run_oldtests() {(
   enter_suite oldtests
   ulimit -c unlimited || true
-  if ! make -C "${TRAVIS_BUILD_DIR}/src/nvim/testdir"; then
+  if ! make oldtest; then
     reset
     fail 'oldtests' F 'Legacy tests failed'
   fi
   submit_coverage oldtest
-  asan_check "${LOG_DIR}"
+  check_sanitizer "${LOG_DIR}"
   valgrind_check "${LOG_DIR}"
   check_core_dumps
   exit_suite

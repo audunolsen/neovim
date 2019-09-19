@@ -42,6 +42,8 @@ function Test_window_cmd_wincmd_gf()
   function s:swap_exists()
     let v:swapchoice = s:swap_choice
   endfunc
+  " Remove the catch-all that runtest.vim adds
+  au! SwapExists
   augroup test_window_cmd_wincmd_gf
     autocmd!
     exec "autocmd SwapExists " . fname . " call s:swap_exists()"
@@ -142,6 +144,21 @@ func Test_window_preview()
   call assert_equal(0, &previewwindow)
 
   call assert_fails('wincmd P', 'E441:')
+endfunc
+
+func Test_window_preview_from_help()
+  filetype on
+  call writefile(['/* some C code */'], 'Xpreview.c')
+  help
+  pedit Xpreview.c
+  wincmd P
+  call assert_equal(1, &previewwindow)
+  call assert_equal('c', &filetype)
+  wincmd z
+
+  filetype off
+  close
+  call delete('Xpreview.c')
 endfunc
 
 func Test_window_exchange()
@@ -518,6 +535,43 @@ func Test_winrestcmd()
   only
 endfunc
 
+function! Fun_RenewFile()
+  " Need to wait a bit for the timestamp to be older.
+  sleep 2
+  silent execute '!echo "1" > tmp.txt'
+  sp
+  wincmd p
+  edit! tmp.txt
+endfunction
+
+func Test_window_prevwin()
+  " Can we make this work on MS-Windows?
+  if !has('unix')
+    return
+  endif
+
+  set hidden autoread
+  call writefile(['2'], 'tmp.txt')
+  new tmp.txt
+  q
+  call Fun_RenewFile()
+  call assert_equal(2, winnr())
+  wincmd p
+  call assert_equal(1, winnr())
+  wincmd p
+  q
+  call Fun_RenewFile()
+  call assert_equal(2, winnr())
+  wincmd p
+  call assert_equal(1, winnr())
+  wincmd p
+  " reset
+  q
+  call delete('tmp.txt')
+  set hidden&vim autoread&vim
+  delfunc Fun_RenewFile
+endfunc
+
 func Test_relative_cursor_position_in_one_line_window()
   new
   only
@@ -644,6 +698,56 @@ func Test_relative_cursor_second_line_after_resize()
   only!
   bwipe!
   let &so = so_save
+endfunc
+
+" Tests for the winnr() function
+func Test_winnr()
+  only | tabonly
+  call assert_equal(1, winnr('j'))
+  call assert_equal(1, winnr('k'))
+  call assert_equal(1, winnr('h'))
+  call assert_equal(1, winnr('l'))
+
+  " create a set of horizontally and vertically split windows
+  leftabove new | wincmd p
+  leftabove new | wincmd p
+  rightbelow new | wincmd p
+  rightbelow new | wincmd p
+  leftabove vnew | wincmd p
+  leftabove vnew | wincmd p
+  rightbelow vnew | wincmd p
+  rightbelow vnew | wincmd p
+
+  call assert_equal(8, winnr('j'))
+  call assert_equal(2, winnr('k'))
+  call assert_equal(4, winnr('h'))
+  call assert_equal(6, winnr('l'))
+  call assert_equal(9, winnr('2j'))
+  call assert_equal(1, winnr('2k'))
+  call assert_equal(3, winnr('2h'))
+  call assert_equal(7, winnr('2l'))
+
+  " Error cases
+  call assert_fails("echo winnr('0.2k')", 'E15:')
+  call assert_equal(2, winnr('-2k'))
+  call assert_fails("echo winnr('-2xj')", 'E15:')
+  call assert_fails("echo winnr('j2j')", 'E15:')
+  call assert_fails("echo winnr('ll')", 'E15:')
+  call assert_fails("echo winnr('5')", 'E15:')
+  call assert_equal(4, winnr('0h'))
+
+  tabnew
+  call assert_equal(8, tabpagewinnr(1, 'j'))
+  call assert_equal(2, tabpagewinnr(1, 'k'))
+  call assert_equal(4, tabpagewinnr(1, 'h'))
+  call assert_equal(6, tabpagewinnr(1, 'l'))
+
+  only | tabonly
+endfunc
+
+func Test_window_colon_command()
+  " This was reading invalid memory.
+  exe "norm! v\<C-W>:\<C-U>echo v:version"
 endfunc
 
 " vim: shiftwidth=2 sts=2 expandtab

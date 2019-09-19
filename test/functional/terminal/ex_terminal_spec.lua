@@ -27,11 +27,7 @@ describe(':terminal', function()
       echomsg "msg3"
     ]])
     -- Invoke a command that emits frequent terminal activity.
-    if iswin() then
-      feed_command([[terminal for /L \%I in (1,0,2) do echo \%I]])
-    else
-      feed_command([[terminal while true; do echo X; done]])
-    end
+    feed([[:terminal "]]..nvim_dir..[[/shell-test" REP 9999 !terminal_output!<cr>]])
     feed([[<C-\><C-N>]])
     wait()
     -- Wait for some terminal activity.
@@ -99,6 +95,22 @@ describe(':terminal', function()
     eq(3, #jumps)
   end)
 
+  it(':stopinsert RPC request exits terminal-mode #7807', function()
+    command(':terminal')
+    feed('i[tui] insert-mode')
+    eq({ blocking=false, mode='t' }, nvim('get_mode'))
+    command('stopinsert')
+    eq({ blocking=false, mode='n' }, nvim('get_mode'))
+  end)
+
+  it(':stopinsert in normal mode doesn\'t break insert mode #9889', function()
+    command(':terminal')
+    eq({ blocking=false, mode='n' }, nvim('get_mode'))
+    command(':stopinsert')
+    eq({ blocking=false, mode='n' }, nvim('get_mode'))
+    feed('a')
+    eq({ blocking=false, mode='t' }, nvim('get_mode'))
+  end)
 end)
 
 describe(':terminal (with fake shell)', function()
@@ -121,7 +133,7 @@ describe(':terminal (with fake shell)', function()
 
   it('with no argument, acts like termopen()', function()
     terminal_with_fake_shell()
-    retry(3, 4 * screen.timeout, function()
+    retry(nil, 4 * screen.timeout, function()
     screen:expect([[
       ^ready $                                           |
       [Process exited 0]                                |
@@ -245,4 +257,14 @@ describe(':terminal (with fake shell)', function()
     eq('scripts/shadacat.py', eval('bufname("%")'))
   end)
 
+  it('with bufhidden=delete #3958', function()
+    command('set hidden')
+    eq(1, eval('&hidden'))
+    command('autocmd BufNew * setlocal bufhidden=delete')
+    for _ = 1, 5 do
+      source([[
+      execute 'edit '.reltimestr(reltime())
+      terminal]])
+    end
+  end)
 end)

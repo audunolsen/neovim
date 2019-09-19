@@ -71,17 +71,17 @@
 -- To help write screen tests, see Screen:snapshot_util().
 -- To debug screen tests, see Screen:redraw_debug().
 
-local global_helpers = require('test.helpers')
-local deepcopy = global_helpers.deepcopy
-local shallowcopy = global_helpers.shallowcopy
 local helpers = require('test.functional.helpers')(nil)
+local deepcopy = helpers.deepcopy
+local shallowcopy = helpers.shallowcopy
+local concat_tables = helpers.concat_tables
 local request, run_session = helpers.request, helpers.run_session
 local eq = helpers.eq
 local dedent = helpers.dedent
 local get_session = helpers.get_session
 local create_callindex = helpers.create_callindex
 
-local inspect = require('inspect')
+local inspect = require('vim.inspect')
 
 local function isempty(v)
   return type(v) == 'table' and next(v) == nil
@@ -159,12 +159,15 @@ function Screen.new(width, height)
     wildmenu_selected = nil,
     win_position = {},
     float_pos = {},
+    msg_grid = nil,
+    msg_grid_pos = nil,
     _session = nil,
     messages = {},
     msg_history = {},
     showmode = {},
     showcmd = {},
     ruler = {},
+    hl_groups = {},
     _default_attr_ids = nil,
     _default_attr_ignore = nil,
     _mouse_enabled = true,
@@ -315,14 +318,15 @@ local ext_keys = {
 -- cmdline_block:  Expected ext_cmdline block (for function definitions)
 -- wildmenu_items: Expected items for ext_wildmenu
 -- wildmenu_pos:   Expected position for ext_wildmenu
-function Screen:expect(expected, attr_ids, attr_ignore)
+function Screen:expect(expected, attr_ids, attr_ignore, ...)
   local grid, condition = nil, nil
   local expected_rows = {}
+  assert(next({...}) == nil, "invalid args to expect()")
   if type(expected) == "table" then
     assert(not (attr_ids ~= nil or attr_ignore ~= nil))
     local is_key = {grid=true, attr_ids=true, attr_ignore=true, condition=true,
                     any=true, mode=true, unchanged=true, intermediate=true,
-                    reset=true, timeout=true}
+                    reset=true, timeout=true, request_cb=true, hl_groups=true}
     for _, v in ipairs(ext_keys) do
       is_key[v] = true
     end
@@ -389,52 +393,77 @@ function Screen:expect(expected, attr_ids, attr_ignore)
     end
 
     if grid ~= nil then
+      local err_msg, msg_expected_rows = nil, {}
       -- `expected` must match the screen lines exactly.
       if #actual_rows ~= #expected_rows then
-        return "Expected screen state's row count(" .. #expected_rows
-        .. ') differs from configured height(' .. #actual_rows .. ') of Screen.'
+        err_msg = "Expected screen height " .. #expected_rows
+        .. ' differs from actual height ' .. #actual_rows .. '.'
       end
-      for i = 1, #actual_rows do
+      for i = 1, #expected_rows do
+         msg_expected_rows[i] = expected_rows[i]
         if expected_rows[i] ~= actual_rows[i] and expected_rows[i] ~= "{IGNORE}|" then
-          local msg_expected_rows = {}
-          for j = 1, #expected_rows do
-            msg_expected_rows[j] = expected_rows[j]
-          end
           msg_expected_rows[i] = '*' .. msg_expected_rows[i]
-          actual_rows[i] = '*' .. actual_rows[i]
-          return (
-            'Row ' .. tostring(i) .. ' did not match.\n'
-            ..'Expected:\n  |'..table.concat(msg_expected_rows, '\n  |')..'\n'
-            ..'Actual:\n  |'..table.concat(actual_rows, '\n  |')..'\n\n'..[[
+          if i <= #actual_rows then
+            actual_rows[i] = '*' .. actual_rows[i]
+          end
+          if err_msg == nil then
+            err_msg = 'Row ' .. tostring(i) .. ' did not match.'
+          end
+        end
+      end
+      if err_msg ~= nil then
+        return (
+          err_msg..'\nExpected:\n  |'..table.concat(msg_expected_rows, '\n  |')..'\n'
+          ..'Actual:\n  |'..table.concat(actual_rows, '\n  |')..'\n\n'..[[
 To print the expect() call that would assert the current screen state, use
 screen:snapshot_util(). In case of non-deterministic failures, use
 screen:redraw_debug() to show all intermediate screen states.  ]])
-        end
       end
     end
 
-    -- Extension features. The default expectations should cover the case of
+    -- UI extensions. The default expectations should cover the case of
     -- the ext_ feature being disabled, or the feature currently not activated
-    -- (for instance no external cmdline visible). Some extensions require
+    -- (e.g. no external cmdline visible). Some extensions require
     -- preprocessing to represent highlights in a reproducible way.
     local extstate = self:_extstate_repr(attr_state)
+    if expected.mode ~= nil then
+      extstate.mode = self.mode
+    end
 
-    -- convert assertion errors into invalid screen state descriptions
-    local status, res = pcall(function()
-      for _, k in ipairs(ext_keys) do
-        -- Empty states is considered the default and need not be mentioned
-        if not (expected[k] == nil and isempty(extstate[k])) then
-          eq(expected[k], extstate[k], k)
+    -- Convert assertion errors into invalid screen state descriptions.
+    for _, k in ipairs(concat_tables(ext_keys, {'mode'})) do
+      -- Empty states are considered the default and need not be mentioned.
+      if (not (expected[k] == nil and isempty(extstate[k]))) then
+        local status, res = pcall(eq, expected[k], extstate[k], k)
+        if not status then
+          return (tostring(res)..'\nHint: full state of "'..k..'":\n  '..inspect(extstate[k]))
         end
       end
-      if expected.mode ~= nil then
-        eq(expected.mode, self.mode, "mode")
+    end
+
+    if expected.hl_groups ~= nil then
+      for name, id in pairs(expected.hl_groups) do
+        local expected_hl = attr_state.ids[id]
+        local actual_hl = self._attr_table[self.hl_groups[name]][(self._options.rgb and 1) or 2]
+        local status, res = pcall(eq, expected_hl, actual_hl, "highlight "..name)
+        if not status then
+          return tostring(res)
+        end
       end
-    end)
-    if not status then
-      return tostring(res)
     end
   end, expected)
+end
+
+function Screen:expect_unchanged(waittime_ms, ignore_attrs, request_cb)
+  waittime_ms = waittime_ms and waittime_ms or 100
+  -- Collect the current screen state.
+  self:sleep(0, request_cb)
+  local kwargs = self:get_snapshot(nil, ignore_attrs)
+
+  -- Check that screen state does not change.
+  kwargs.unchanged = true
+  kwargs.timeout = waittime_ms
+  self:expect(kwargs)
 end
 
 function Screen:_wait(check, flags)
@@ -467,8 +496,8 @@ function Screen:_wait(check, flags)
     immediate_seen = true
   end
 
-  -- for an unchanged test, flags.timeout means the time during the state is
-  -- expected to be unchanged, so always wait this full time.
+  -- For an "unchanged" test, flags.timeout is the time during which the state
+  -- must not change, so always wait this full time.
   if (flags.unchanged or flags.intermediate) and flags.timeout ~= nil then
     minimal_timeout = timeout
   end
@@ -477,7 +506,8 @@ function Screen:_wait(check, flags)
   local did_miminal_timeout = false
 
   local function notification_cb(method, args)
-    assert(method == 'redraw')
+    assert(method == 'redraw', string.format(
+      'notification_cb: unexpected method (%s, args=%s)', method, inspect(args)))
     did_flush = self:_redraw(args)
     if not did_flush then
       return
@@ -495,12 +525,12 @@ function Screen:_wait(check, flags)
       end
     elseif success_seen and #args > 0 then
       failure_after_success = true
-      --print(require('inspect')(args))
+      -- print(inspect(args))
     end
 
     return true
   end
-  run_session(self._session, nil, notification_cb, nil, minimal_timeout)
+  run_session(self._session, flags.request_cb, notification_cb, nil, minimal_timeout)
   if not did_flush then
     err = "no flush received"
   elseif not checked then
@@ -513,7 +543,7 @@ function Screen:_wait(check, flags)
 
   if not success_seen then
     did_miminal_timeout = true
-    run_session(self._session, nil, notification_cb, nil, timeout-minimal_timeout)
+    run_session(self._session, flags.request_cb, notification_cb, nil, timeout-minimal_timeout)
   end
 
   local did_warn = false
@@ -568,25 +598,29 @@ asynchronous (feed(), nvim_input()) and synchronous API calls.
   end
 end
 
-function Screen:sleep(ms)
+function Screen:sleep(ms, request_cb)
   local function notification_cb(method, args)
     assert(method == 'redraw')
     self:_redraw(args)
   end
-  run_session(self._session, nil, notification_cb, nil, ms)
+  run_session(self._session, request_cb, notification_cb, nil, ms)
 end
 
 function Screen:_redraw(updates)
   local did_flush = false
   for k, update in ipairs(updates) do
-    -- print('--')
-    -- print(require('inspect')(update))
+    -- print('--', inspect(update))
     local method = update[1]
     for i = 2, #update do
       local handler_name = '_handle_'..method
       local handler = self[handler_name]
       if handler ~= nil then
-        handler(self, unpack(update[i]))
+        local status, res = pcall(handler, self, unpack(update[i]))
+        if not status then
+          error(handler_name..' failed'
+            ..'\n  payload: '..inspect(update)
+            ..'\n  error:   '..tostring(res))
+        end
       else
         assert(self._on_event,
           "Add Screen:"..handler_name.." or call Screen:set_on_event_handler")
@@ -649,13 +683,12 @@ function Screen:_handle_grid_resize(grid, width, height)
   }
 end
 
-function Screen:_handle_win_scroll_over_start()
-   self.scroll_over = true
-   self.scroll_over_pos = self._grids[1].height
-end
 
-function Screen:_handle_win_scroll_over_reset()
-   self.scroll_over = false
+function Screen:_handle_msg_set_pos(grid, row, scrolled, char)
+  self.msg_grid = grid
+  self.msg_grid_pos = row
+  self.msg_scrolled = scrolled
+  self.msg_sep_char = char
 end
 
 function Screen:_handle_flush()
@@ -796,10 +829,6 @@ function Screen:_handle_scroll(count)
 end
 
 function Screen:_handle_grid_scroll(g, top, bot, left, right, rows, cols)
-  if self.scroll_over and g == 1 and top < self.scroll_over_pos then
-    self.scroll_over_pos = top
-  end
-
   top = top+1
   left = left+1
   assert(cols == 0)
@@ -830,7 +859,7 @@ function Screen:_handle_grid_scroll(g, top, bot, left, right, rows, cols)
 
   -- clear invalid rows
   for i = stop + step, stop + rows, step do
-    self:_clear_row_section(grid, i, left, right)
+    self:_clear_row_section(grid, i, left, right, true)
   end
 end
 
@@ -838,6 +867,10 @@ function Screen:_handle_hl_attr_define(id, rgb_attrs, cterm_attrs, info)
   self._attr_table[id] = {rgb_attrs, cterm_attrs}
   self._hl_info[id] = info
   self._new_attrs = true
+end
+
+function Screen:_handle_hl_group_set(name, id)
+  self.hl_groups[name] = id
 end
 
 function Screen:get_hl(val)
@@ -949,6 +982,14 @@ function Screen:_handle_cmdline_show(content, pos, firstc, prompt, indent, level
   if firstc == '' then firstc = nil end
   if prompt == '' then prompt = nil end
   if indent == 0 then indent = nil end
+
+  -- check position is valid #10000
+  local len = 0
+  for _, chunk in ipairs(content) do
+    len = len + string.len(chunk[2])
+  end
+  assert(pos <= len)
+
   self.cmdline[level] = {content=content, pos=pos, firstc=firstc,
                          prompt=prompt, indent=indent}
 end
@@ -1024,10 +1065,10 @@ function Screen:_clear_block(grid, top, bot, left, right)
   end
 end
 
-function Screen:_clear_row_section(grid, rownum, startcol, stopcol)
+function Screen:_clear_row_section(grid, rownum, startcol, stopcol, invalid)
   local row = grid.rows[rownum]
   for i = startcol, stopcol do
-    row[i].text = ' '
+    row[i].text = (invalid and '�' or ' ')
     row[i].attrs = self._clear_attrs
   end
 end
@@ -1037,10 +1078,10 @@ function Screen:_row_repr(gridnr, rownr, attr_state, cursor)
   local current_attr_id
   local i = 1
   local has_windows = self._options.ext_multigrid and gridnr == 1
-  if self.scroll_over and self.scroll_over_pos < rownr then
-    has_windows = false
-  end
   local row = self._grids[gridnr].rows[rownr]
+  if has_windows and self.msg_grid and self.msg_grid_pos < rownr then
+    return '['..self.msg_grid..':'..string.rep('-',#row)..']'
+  end
   while i <= #row do
     local did_window = false
     if has_windows then
@@ -1148,8 +1189,8 @@ end
 -- Use snapshot_util({},true) to generate a text-only (no attributes) test.
 --
 -- @see Screen:redraw_debug()
-function Screen:snapshot_util(attrs, ignore)
-  self:sleep(250)
+function Screen:snapshot_util(attrs, ignore, request_cb)
+  self:sleep(250, request_cb)
   self:print_snapshot(attrs, ignore)
 end
 
@@ -1178,9 +1219,18 @@ function Screen:render(headers, attr_state, preview)
   local rv = {}
   for igrid,grid in pairs(self._grids) do
     if headers then
-      table.insert(rv, "## grid "..igrid)
+      local suffix = ""
+      if igrid > 1 and self.win_position[igrid] == nil
+        and self.float_pos[igrid] == nil and self.msg_grid ~= igrid then
+        suffix = " (hidden)"
+      end
+      table.insert(rv, "## grid "..igrid..suffix)
     end
-    for i = 1, grid.height do
+    local height = grid.height
+    if igrid == self.msg_grid then
+      height = self._grids[1].height - self.msg_grid_pos
+    end
+    for i = 1, height do
       local cursor = self._cursor.grid == igrid and self._cursor.row == i
       local prefix = (headers or preview) and "  " or ""
       table.insert(rv, prefix..self:_row_repr(igrid, i, attr_state, cursor).."|")
@@ -1189,7 +1239,13 @@ function Screen:render(headers, attr_state, preview)
   return rv
 end
 
-function Screen:print_snapshot(attrs, ignore)
+local remove_all_metatables = function(item, path)
+  if path[#path] ~= inspect.METATABLE then return item end
+end
+
+-- Returns the current screen state in the form of a screen:expect()
+-- keyword-args map.
+function Screen:get_snapshot(attrs, ignore)
   attrs = attrs or self._default_attr_ids
   if ignore == nil then
     ignore = self._default_attr_ignore
@@ -1212,15 +1268,32 @@ function Screen:print_snapshot(attrs, ignore)
   local lines = self:render(true, attr_state, true)
 
   local ext_state = self:_extstate_repr(attr_state)
-  local keys = false
   for k, v in pairs(ext_state) do
     if isempty(v) then
       ext_state[k] = nil -- deleting keys while iterating is ok
-    else
-      keys = true
     end
   end
 
+  -- Build keyword-args for screen:expect().
+  local kwargs = {}
+  if attr_state.modified then
+    kwargs['attr_ids'] = {}
+    for i, a in pairs(attr_state.ids) do
+      kwargs['attr_ids'][i] = a
+    end
+  end
+  kwargs['grid'] = table.concat(lines, '\n')
+  for _, k in ipairs(ext_keys) do
+    if ext_state[k] ~= nil then
+      kwargs[k] = ext_state[k]
+    end
+  end
+
+  return kwargs, ext_state, attr_state
+end
+
+function Screen:print_snapshot(attrs, ignore)
+  local kwargs, ext_state, attr_state = self:get_snapshot(attrs, ignore)
   local attrstr = ""
   if attr_state.modified then
     local attrstrs = {}
@@ -1234,19 +1307,19 @@ function Screen:print_snapshot(attrs, ignore)
       local keyval = (type(i) == "number") and "["..tostring(i).."]" or i
       table.insert(attrstrs, "  "..keyval.." = "..dict..",")
     end
-    attrstr = (", "..(keys and "attr_ids=" or "")
-               .."{\n"..table.concat(attrstrs, "\n").."\n}")
+    attrstr = (", attr_ids={\n"..table.concat(attrstrs, "\n").."\n}")
   end
-  print( "\nscreen:expect"..(keys and "{grid=" or "(").."[[")
-  print( table.concat(lines, '\n'))
+
+  print( "\nscreen:expect{grid=[[")
+  print(kwargs.grid)
   io.stdout:write( "]]"..attrstr)
   for _, k in ipairs(ext_keys) do
     if ext_state[k] ~= nil then
-      -- TODO(bfredl): improve formating, remove ext metatables
-      io.stdout:write(", "..k.."="..inspect(ext_state[k]))
+      -- TODO(bfredl): improve formatting
+      io.stdout:write(", "..k.."="..inspect(ext_state[k],{process=remove_all_metatables}))
     end
   end
-  print((keys and "}" or ")").."\n")
+  print("}\n")
   io.stdout:flush()
 end
 
@@ -1330,7 +1403,7 @@ end
 
 
 function Screen:_pprint_hlstate(item)
-    --print(require('inspect')(item))
+    -- print(inspect(item))
     local attrdict = "{"..self:_pprint_attrs(item[1]).."}, "
     local attrdict2, hlinfo
     if self._hlstate_cterm then
@@ -1403,16 +1476,16 @@ function Screen:_get_attr_id(attr_state, attrs, hl_id)
     end
     return "UNEXPECTED "..self:_pprint_attrs(self._attr_table[hl_id][1])
   else
-    for id, a in pairs(attr_state.ids) do
-      if self:_equal_attrs(a, attrs) then
-         return id
-       end
-    end
     if self:_equal_attrs(attrs, {}) or
         attr_state.ignore == true or
         self:_attr_index(attr_state.ignore, attrs) ~= nil then
       -- ignore this attrs
       return nil
+    end
+    for id, a in pairs(attr_state.ids) do
+      if self:_equal_attrs(a, attrs) then
+         return id
+       end
     end
     if attr_state.mutable then
       table.insert(attr_state.ids, attrs)
@@ -1436,7 +1509,8 @@ function Screen:_equal_attrs(a, b)
        a.underline == b.underline and a.undercurl == b.undercurl and
        a.italic == b.italic and a.reverse == b.reverse and
        a.foreground == b.foreground and a.background == b.background and
-       a.special == b.special
+       a.special == b.special and a.blend == b.blend and
+       a.strikethrough == b.strikethrough
 end
 
 function Screen:_equal_info(a, b)

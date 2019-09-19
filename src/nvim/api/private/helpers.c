@@ -11,6 +11,7 @@
 #include "nvim/api/private/defs.h"
 #include "nvim/api/private/handle.h"
 #include "nvim/msgpack_rpc/helpers.h"
+#include "nvim/lua/executor.h"
 #include "nvim/ascii.h"
 #include "nvim/assert.h"
 #include "nvim/vim.h"
@@ -124,6 +125,7 @@ bool try_end(Error *err)
 
   // Set by emsg(), affects aborting().  See also enter_cleanup().
   did_emsg = false;
+  force_abort = false;
 
   if (got_int) {
     if (current_exception) {
@@ -389,15 +391,19 @@ void set_option_to(uint64_t channel_id, void *to, int type,
     stringval = (char *)value.data.string.data;
   }
 
-  const scid_T save_current_SID = current_SID;
-  current_SID = channel_id == LUA_INTERNAL_CALL ? SID_LUA : SID_API_CLIENT;
+  const sctx_T save_current_sctx = current_sctx;
+  current_sctx.sc_sid =
+    channel_id == LUA_INTERNAL_CALL ? SID_LUA : SID_API_CLIENT;
+  current_sctx.sc_lnum = 0;
   current_channel_id = channel_id;
 
-  const int opt_flags = (type == SREQ_GLOBAL) ? OPT_GLOBAL : OPT_LOCAL;
+  const int opt_flags = (type == SREQ_WIN && !(flags & SOPT_GLOBAL))
+                        ? 0 : (type == SREQ_GLOBAL)
+                              ? OPT_GLOBAL : OPT_LOCAL;
   set_option_value_for(name.data, numval, stringval,
                        opt_flags, type, to, err);
 
-  current_SID = save_current_SID;
+  current_sctx = save_current_sctx;
 }
 
 #define TYPVAL_ENCODE_ALLOW_SPECIALS false
@@ -744,6 +750,274 @@ String ga_take_string(garray_T *ga)
   return str;
 }
 
+/// Creates "readfile()-style" ArrayOf(String) from a binary string.
+///
+/// - Lines break at \n (NL/LF/line-feed).
+/// - NUL bytes are replaced with NL.
+/// - If the last byte is a linebreak an extra empty list item is added.
+///
+/// @param input  Binary string
+/// @param crlf  Also break lines at CR and CRLF.
+/// @return [allocated] String array
+Array string_to_array(const String input, bool crlf)
+{
+  Array ret = ARRAY_DICT_INIT;
+  for (size_t i = 0; i < input.size; i++) {
+    const char *start = input.data + i;
+    const char *end = start;
+    size_t line_len = 0;
+    for (; line_len < input.size - i; line_len++) {
+      end = start + line_len;
+      if (*end == NL || (crlf && *end == CAR)) {
+        break;
+      }
+    }
+    i += line_len;
+    if (crlf && *end == CAR && i + 1 < input.size && *(end + 1) == NL) {
+      i += 1;  // Advance past CRLF.
+    }
+    String s = {
+      .size = line_len,
+      .data = xmemdupz(start, line_len),
+    };
+    memchrsub(s.data, NUL, NL, line_len);
+    ADD(ret, STRING_OBJ(s));
+    // If line ends at end-of-buffer, add empty final item.
+    // This is "readfile()-style", see also ":help channel-lines".
+    if (i + 1 == input.size && (*end == NL || (crlf && *end == CAR))) {
+      ADD(ret, STRING_OBJ(STRING_INIT));
+    }
+  }
+
+  return ret;
+}
+
+/// Set, tweak, or remove a mapping in a mode. Acts as the implementation for
+/// functions like @ref nvim_buf_set_keymap.
+///
+/// Arguments are handled like @ref nvim_set_keymap unless noted.
+/// @param  buffer    Buffer handle for a specific buffer, or 0 for the current
+///                   buffer, or -1 to signify global behavior ("all buffers")
+/// @param  is_unmap  When true, removes the mapping that matches {lhs}.
+void modify_keymap(Buffer buffer, bool is_unmap, String mode, String lhs,
+                   String rhs, Dictionary opts, Error *err)
+{
+  char *err_msg = NULL;  // the error message to report, if any
+  char *err_arg = NULL;  // argument for the error message format string
+  ErrorType err_type = kErrorTypeNone;
+
+  char_u *lhs_buf = NULL;
+  char_u *rhs_buf = NULL;
+
+  bool global = (buffer == -1);
+  if (global) {
+    buffer = 0;
+  }
+  buf_T *target_buf = find_buffer_by_handle(buffer, err);
+
+  MapArguments parsed_args;
+  memset(&parsed_args, 0, sizeof(parsed_args));
+  if (parse_keymap_opts(opts, &parsed_args, err)) {
+    goto fail_and_free;
+  }
+  parsed_args.buffer = !global;
+
+  set_maparg_lhs_rhs((char_u *)lhs.data, lhs.size,
+                     (char_u *)rhs.data, rhs.size,
+                     CPO_TO_CPO_FLAGS, &parsed_args);
+
+  if (parsed_args.lhs_len > MAXMAPLEN) {
+    err_msg = "LHS exceeds maximum map length: %s";
+    err_arg = lhs.data;
+    err_type = kErrorTypeValidation;
+    goto fail_with_message;
+  }
+
+  if (mode.size > 1) {
+    err_msg = "Shortname is too long: %s";
+    err_arg = mode.data;
+    err_type = kErrorTypeValidation;
+    goto fail_with_message;
+  }
+  int mode_val;  // integer value of the mapping mode, to be passed to do_map()
+  char_u *p = (char_u *)((mode.size) ? mode.data : "m");
+  if (STRNCMP(p, "!", 2) == 0) {
+    mode_val = get_map_mode(&p, true);  // mapmode-ic
+  } else {
+    mode_val = get_map_mode(&p, false);
+    if ((mode_val == VISUAL + SELECTMODE + NORMAL + OP_PENDING)
+        && mode.size > 0) {
+      // get_map_mode() treats unrecognized mode shortnames as ":map".
+      // This is an error unless the given shortname was empty string "".
+      err_msg = "Invalid mode shortname: \"%s\"";
+      err_arg = (char *)p;
+      err_type = kErrorTypeValidation;
+      goto fail_with_message;
+    }
+  }
+
+  if (parsed_args.lhs_len == 0) {
+    err_msg = "Invalid (empty) LHS";
+    err_arg = "";
+    err_type = kErrorTypeValidation;
+    goto fail_with_message;
+  }
+
+  bool is_noremap = parsed_args.noremap;
+  assert(!(is_unmap && is_noremap));
+
+  if (!is_unmap && (parsed_args.rhs_len == 0 && !parsed_args.rhs_is_noop)) {
+    if (rhs.size == 0) {  // assume that the user wants RHS to be a <Nop>
+      parsed_args.rhs_is_noop = true;
+    } else {
+      // the given RHS was nonempty and not a <Nop>, but was parsed as if it
+      // were empty?
+      assert(false && "Failed to parse nonempty RHS!");
+      err_msg = "Parsing of nonempty RHS failed: %s";
+      err_arg = rhs.data;
+      err_type = kErrorTypeException;
+      goto fail_with_message;
+    }
+  } else if (is_unmap && parsed_args.rhs_len) {
+    err_msg = "Gave nonempty RHS in unmap command: %s";
+    err_arg = (char *)parsed_args.rhs;
+    err_type = kErrorTypeValidation;
+    goto fail_with_message;
+  }
+
+  // buf_do_map() reads noremap/unmap as its own argument.
+  int maptype_val = 0;
+  if (is_unmap) {
+    maptype_val = 1;
+  } else if (is_noremap) {
+    maptype_val = 2;
+  }
+
+  switch (buf_do_map(maptype_val, &parsed_args, mode_val, 0, target_buf)) {
+    case 0:
+      break;
+    case 1:
+      api_set_error(err, kErrorTypeException, (char *)e_invarg, 0);
+      goto fail_and_free;
+    case 2:
+      api_set_error(err, kErrorTypeException, (char *)e_nomap, 0);
+      goto fail_and_free;
+    case 5:
+      api_set_error(err, kErrorTypeException,
+                    "E227: mapping already exists for %s", parsed_args.lhs);
+      goto fail_and_free;
+    default:
+      assert(false && "Unrecognized return code!");
+      goto fail_and_free;
+  }  // switch
+
+  xfree(lhs_buf);
+  xfree(rhs_buf);
+  xfree(parsed_args.rhs);
+  xfree(parsed_args.orig_rhs);
+
+  return;
+
+fail_with_message:
+  api_set_error(err, err_type, err_msg, err_arg);
+
+fail_and_free:
+  xfree(lhs_buf);
+  xfree(rhs_buf);
+  xfree(parsed_args.rhs);
+  xfree(parsed_args.orig_rhs);
+  return;
+}
+
+/// Read in the given opts, setting corresponding flags in `out`.
+///
+/// @param opts A dictionary passed to @ref nvim_set_keymap or
+///             @ref nvim_buf_set_keymap.
+/// @param[out]   out  MapArguments object in which to set parsed
+///                    |:map-arguments| flags.
+/// @param[out]   err  Error details, if any.
+///
+/// @returns Zero on success, nonzero on failure.
+Integer parse_keymap_opts(Dictionary opts, MapArguments *out, Error *err)
+{
+  char *err_msg = NULL;  // the error message to report, if any
+  char *err_arg = NULL;  // argument for the error message format string
+  ErrorType err_type = kErrorTypeNone;
+
+  out->buffer = false;
+  out->nowait = false;
+  out->silent = false;
+  out->script = false;
+  out->expr = false;
+  out->unique = false;
+
+  for (size_t i = 0; i < opts.size; i++) {
+    KeyValuePair *key_and_val = &opts.items[i];
+    char *optname = key_and_val->key.data;
+
+    if (key_and_val->value.type != kObjectTypeBoolean) {
+      err_msg = "Gave non-boolean value for an opt: %s";
+      err_arg = optname;
+      err_type = kErrorTypeValidation;
+      goto fail_with_message;
+    }
+
+    bool was_valid_opt = false;
+    switch (optname[0]) {
+      // note: strncmp up to and including the null terminator, so that
+      // "nowaitFoobar" won't match against "nowait"
+
+      // don't recognize 'buffer' as a key; user shouldn't provide <buffer>
+      // when calling nvim_set_keymap or nvim_buf_set_keymap, since it can be
+      // inferred from which function they called
+      case 'n':
+        if (STRNCMP(optname, "noremap", 8) == 0) {
+          was_valid_opt = true;
+          out->noremap = key_and_val->value.data.boolean;
+        } else if (STRNCMP(optname, "nowait", 7) == 0) {
+          was_valid_opt = true;
+          out->nowait = key_and_val->value.data.boolean;
+        }
+        break;
+      case 's':
+        if (STRNCMP(optname, "silent", 7) == 0) {
+          was_valid_opt = true;
+          out->silent = key_and_val->value.data.boolean;
+        } else if (STRNCMP(optname, "script", 7) == 0) {
+          was_valid_opt = true;
+          out->script = key_and_val->value.data.boolean;
+        }
+        break;
+      case 'e':
+        if (STRNCMP(optname, "expr", 5) == 0) {
+          was_valid_opt = true;
+          out->expr = key_and_val->value.data.boolean;
+        }
+        break;
+      case 'u':
+        if (STRNCMP(optname, "unique", 7) == 0) {
+          was_valid_opt = true;
+          out->unique = key_and_val->value.data.boolean;
+        }
+        break;
+      default:
+        break;
+    }  // switch
+    if (!was_valid_opt) {
+      err_msg = "Invalid key: %s";
+      err_arg = optname;
+      err_type = kErrorTypeValidation;
+      goto fail_with_message;
+    }
+  }  // for
+
+  return 0;
+
+fail_with_message:
+  api_set_error(err, err_type, err_msg, err_arg);
+  return 1;
+}
+
 /// Collects `n` buffer lines into array `l`, optionally replacing newlines
 /// with NUL.
 ///
@@ -919,6 +1193,10 @@ void api_free_object(Object value)
 
     case kObjectTypeDictionary:
       api_free_dictionary(value.data.dictionary);
+      break;
+
+    case kObjectTypeLuaRef:
+      executor_free_luaref(value.data.luaref);
       break;
 
     default:

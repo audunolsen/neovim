@@ -4,6 +4,7 @@ local Screen = require('test.functional.ui.screen')
 local clear = helpers.clear
 local command = helpers.command
 local eq = helpers.eq
+local matches = helpers.matches
 local eval = helpers.eval
 local feed = helpers.feed
 local funcs = helpers.funcs
@@ -13,9 +14,7 @@ local nvim_set = helpers.nvim_set
 local read_file = helpers.read_file
 local retry = helpers.retry
 local rmdir = helpers.rmdir
-local set_session = helpers.set_session
 local sleep = helpers.sleep
-local spawn = helpers.spawn
 local iswin = helpers.iswin
 local write_file = helpers.write_file
 
@@ -48,7 +47,7 @@ describe('startup', function()
     ]])
   end)
   it('in a TTY: has("ttyin")==1 has("ttyout")==1', function()
-    local screen = Screen.new(25, 3)
+    local screen = Screen.new(25, 4)
     screen:attach()
     if iswin() then
       command([[set shellcmdflag=/s\ /c shellxquote=\"]])
@@ -60,6 +59,7 @@ describe('startup', function()
             ..[[, shellescape(v:progpath))]])
     screen:expect([[
       ^                         |
+      ~                        |
       1 1                      |
                                |
     ]])
@@ -98,7 +98,7 @@ describe('startup', function()
     end)
   end)
   it('input from pipe (implicit) #7679', function()
-    local screen = Screen.new(25, 3)
+    local screen = Screen.new(25, 4)
     screen:attach()
     if iswin() then
       command([[set shellcmdflag=/s\ /c shellxquote=\"]])
@@ -111,6 +111,7 @@ describe('startup', function()
             ..[[, shellescape(v:progpath))]])
     screen:expect([[
       ^foo                      |
+      ~                        |
       0 1                      |
                                |
     ]])
@@ -203,9 +204,78 @@ describe('startup', function()
                     { 'set encoding', '' }))
   end)
 
+  it('-es/-Es disables swapfile, user config #8540', function()
+    for _,arg in ipairs({'-es', '-Es'}) do
+      local out = funcs.system({nvim_prog, arg,
+                                '+set swapfile? updatecount? shada?',
+                                "+put =execute('scriptnames')", '+%print'})
+      local line1 = string.match(out, '^.-\n')
+      -- updatecount=0 means swapfile was disabled.
+      eq("  swapfile  updatecount=0  shada=!,'100,<50,s10,h\n", line1)
+      -- Standard plugins were loaded, but not user config.
+      eq('health.vim', string.match(out, 'health.vim'))
+      eq(nil, string.match(out, 'init.vim'))
+    end
+  end)
+
+  it('fails on --embed with -es/-Es', function()
+    matches('nvim[.exe]*: %-%-embed conflicts with %-es/%-Es',
+      funcs.system({nvim_prog, '--embed', '-es' }))
+    matches('nvim[.exe]*: %-%-embed conflicts with %-es/%-Es',
+      funcs.system({nvim_prog, '--embed', '-Es' }))
+  end)
+
   it('does not crash if --embed is given twice', function()
     clear{args={'--embed'}}
     eq(2, eval('1+1'))
+  end)
+
+  it('does not crash when expanding cdpath during early_init', function()
+    clear{env={CDPATH='~doesnotexist'}}
+    eq(',~doesnotexist', eval('&cdpath'))
+  end)
+
+  it('ENTER dismisses early message #7967', function()
+    local screen
+    screen = Screen.new(60, 6)
+    screen:attach()
+    command([[let g:id = termopen('"]]..nvim_prog..
+    [[" -u NONE -i NONE --cmd "set noruler" --cmd "let g:foo = g:bar"')]])
+    screen:expect([[
+      ^                                                            |
+      Error detected while processing pre-vimrc command line:     |
+      E121: Undefined variable: g:bar                             |
+      E15: Invalid expression: g:bar                              |
+      Press ENTER or type command to continue                     |
+                                                                  |
+    ]])
+    command([[call chansend(g:id, "\n")]])
+    screen:expect([[
+      ^                                                            |
+      ~                                                           |
+      ~                                                           |
+      [No Name]                                                   |
+                                                                  |
+                                                                  |
+    ]])
+  end)
+
+  it("sets 'shortmess' when loading other tabs", function()
+    clear({args={'-p', 'a', 'b', 'c'}})
+    local screen = Screen.new(25, 4)
+    screen:attach()
+    screen:expect({grid=[[
+        {1: a }{2: b  c }{3:               }{2:X}|
+        ^                         |
+        {4:~                        }|
+                                 |
+          ]],
+      attr_ids={
+        [1] = {bold = true},
+        [2] = {background = Screen.colors.LightGrey, underline = true},
+        [3] = {reverse = true},
+        [4] = {bold = true, foreground = Screen.colors.Blue1},
+    }})
   end)
 end)
 
@@ -214,10 +284,6 @@ describe('sysinit', function()
   local vimdir = 'Xvim'
   local xhome = 'Xhome'
   local pathsep = helpers.get_pathsep()
-  local argv = {
-    nvim_prog, '--headless', '--embed', '-i', 'NONE', '-n',
-    '--cmd', 'set nomore undodir=. directory=. belloff='
-  }
 
   before_each(function()
     rmdir(xdgdir)
@@ -246,19 +312,21 @@ describe('sysinit', function()
   end)
 
   it('prefers XDG_CONFIG_DIRS over VIM', function()
-    set_session(spawn(argv, nil,
-                      { 'HOME='..xhome,
-                        'XDG_CONFIG_DIRS='..xdgdir,
-                        'VIM='..vimdir }))
+    clear{args={'--cmd', 'set nomore undodir=. directory=. belloff='},
+          args_rm={'-u', '--cmd'},
+          env={ HOME=xhome,
+                XDG_CONFIG_DIRS=xdgdir,
+                VIM=vimdir }}
     eq('loaded 1 xdg 1 vim 0',
        eval('printf("loaded %d xdg %d vim %d", g:loaded, get(g:, "xdg", 0), get(g:, "vim", 0))'))
   end)
 
   it('uses VIM if XDG_CONFIG_DIRS unset', function()
-    set_session(spawn(argv, nil,
-                      { 'HOME='..xhome,
-                        'XDG_CONFIG_DIRS=',
-                        'VIM='..vimdir }))
+    clear{args={'--cmd', 'set nomore undodir=. directory=. belloff='},
+          args_rm={'-u', '--cmd'},
+          env={ HOME=xhome,
+                XDG_CONFIG_DIRS='',
+                VIM=vimdir }}
     eq('loaded 1 xdg 0 vim 1',
        eval('printf("loaded %d xdg %d vim %d", g:loaded, get(g:, "xdg", 0), get(g:, "vim", 0))'))
   end)

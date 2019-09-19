@@ -15,14 +15,48 @@ func Test_complete_list()
 endfunc
 
 func Test_complete_wildmenu()
-  call writefile(['testfile1'], 'Xtestfile1')
-  call writefile(['testfile2'], 'Xtestfile2')
+  call mkdir('Xdir1/Xdir2', 'p')
+  call writefile(['testfile1'], 'Xdir1/Xtestfile1')
+  call writefile(['testfile2'], 'Xdir1/Xtestfile2')
+  call writefile(['testfile3'], 'Xdir1/Xdir2/Xtestfile3')
+  call writefile(['testfile3'], 'Xdir1/Xdir2/Xtestfile4')
   set wildmenu
-  call feedkeys(":e Xtestf\t\t\r", "tx")
+
+  " Pressing <Tab> completes, and moves to next files when pressing again.
+  call feedkeys(":e Xdir1/\<Tab>\<Tab>\<CR>", 'tx')
+  call assert_equal('testfile1', getline(1))
+  call feedkeys(":e Xdir1/\<Tab>\<Tab>\<Tab>\<CR>", 'tx')
   call assert_equal('testfile2', getline(1))
 
-  call delete('Xtestfile1')
-  call delete('Xtestfile2')
+  " <S-Tab> is like <Tab> but begin with the last match and then go to
+  " previous.
+  call feedkeys(":e Xdir1/Xtest\<S-Tab>\<CR>", 'tx')
+  call assert_equal('testfile2', getline(1))
+  call feedkeys(":e Xdir1/Xtest\<S-Tab>\<S-Tab>\<CR>", 'tx')
+  call assert_equal('testfile1', getline(1))
+
+  " <Left>/<Right> to move to previous/next file.
+  call feedkeys(":e Xdir1/\<Tab>\<Right>\<CR>", 'tx')
+  call assert_equal('testfile1', getline(1))
+  call feedkeys(":e Xdir1/\<Tab>\<Right>\<Right>\<CR>", 'tx')
+  call assert_equal('testfile2', getline(1))
+  call feedkeys(":e Xdir1/\<Tab>\<Right>\<Right>\<Left>\<CR>", 'tx')
+  call assert_equal('testfile1', getline(1))
+
+  " <Up>/<Down> to go up/down directories.
+  call feedkeys(":e Xdir1/\<Tab>\<Down>\<CR>", 'tx')
+  call assert_equal('testfile3', getline(1))
+  call feedkeys(":e Xdir1/\<Tab>\<Down>\<Up>\<Right>\<CR>", 'tx')
+  call assert_equal('testfile1', getline(1))
+
+  " cleanup
+  %bwipe
+  call delete('Xdir1/Xdir2/Xtestfile4')
+  call delete('Xdir1/Xdir2/Xtestfile3')
+  call delete('Xdir1/Xtestfile2')
+  call delete('Xdir1/Xtestfile1')
+  call delete('Xdir1/Xdir2', 'd')
+  call delete('Xdir1', 'd')
   set nowildmenu
 endfunc
 
@@ -44,6 +78,42 @@ func Test_map_completion()
   call assert_equal('"map <special> <nowait>', getreg(':'))
   call feedkeys(":map <silent> <sp\<Tab>\<Home>\"\<CR>", 'xt')
   call assert_equal('"map <silent> <special>', getreg(':'))
+
+  map ,f commaf
+  map ,g commaf
+  call feedkeys(":map ,\<Tab>\<Home>\"\<CR>", 'xt')
+  call assert_equal('"map ,f', getreg(':'))
+  call feedkeys(":map ,\<Tab>\<Tab>\<Home>\"\<CR>", 'xt')
+  call assert_equal('"map ,g', getreg(':'))
+  unmap ,f
+  unmap ,g
+
+  set cpo-=< cpo-=B cpo-=k
+  map <Left> left
+  call feedkeys(":map <L\<Tab>\<Home>\"\<CR>", 'xt')
+  call assert_equal('"map <Left>', getreg(':'))
+  unmap <Left>
+
+  " set cpo+=<
+  map <Left> left
+  call feedkeys(":map <L\<Tab>\<Home>\"\<CR>", 'xt')
+  call assert_equal('"map <Left>', getreg(':'))
+  unmap <Left>
+  set cpo-=<
+
+  set cpo+=B
+  map <Left> left
+  call feedkeys(":map <L\<Tab>\<Home>\"\<CR>", 'xt')
+  call assert_equal('"map <Left>', getreg(':'))
+  unmap <Left>
+  set cpo-=B
+
+  " set cpo+=k
+  map <Left> left
+  call feedkeys(":map <L\<Tab>\<Home>\"\<CR>", 'xt')
+  call assert_equal('"map <Left>', getreg(':'))
+  unmap <Left>
+  " set cpo-=k
 endfunc
 
 func Test_match_completion()
@@ -206,7 +276,6 @@ func Test_getcompletion()
   let l = getcompletion('break', 'compiler')
   call assert_equal([], l)
 
-  helptags ALL
   let l = getcompletion('last', 'help')
   call assert_true(index(l, ':tablast') >= 0)
   let l = getcompletion('giveup', 'help')
@@ -231,6 +300,15 @@ func Test_getcompletion()
   call assert_true(index(l, '<buffer>') >= 0)
   let l = getcompletion('not', 'mapclear')
   call assert_equal([], l)
+
+  let l = getcompletion('.', 'shellcmd')
+  call assert_equal(['./', '../'], l[0:1])
+  call assert_equal(-1, match(l[2:], '^\.\.\?/$'))
+  let root = has('win32') ? 'C:\\' : '/'
+  let l = getcompletion(root, 'shellcmd')
+  let expected = map(filter(glob(root . '*', 0, 1),
+        \ 'isdirectory(v:val) || executable(v:val)'), 'isdirectory(v:val) ? v:val . ''/'' : v:val')
+  call assert_equal(expected, l)
 
   if has('cscope')
     let l = getcompletion('', 'cscope')
@@ -273,8 +351,7 @@ func Test_getcompletion()
   call assert_equal([], l)
 
   " For others test if the name is recognized.
-  let names = ['buffer', 'environment', 'file_in_path',
-	\ 'mapping', 'shellcmd', 'tag', 'tag_listfiles', 'user']
+  let names = ['buffer', 'environment', 'file_in_path', 'mapping', 'tag', 'tag_listfiles', 'user']
   if has('cmdline_hist')
     call add(names, 'history')
   endif
@@ -294,6 +371,7 @@ func Test_getcompletion()
   endfor
 
   call delete('Xtags')
+  set tags&
 
   call assert_fails('call getcompletion("", "burp")', 'E475:')
 endfunc
@@ -523,7 +601,8 @@ func Test_setcmdpos()
 endfunc
 
 func Test_cmdline_overstrike()
-  let encodings = has('multi_byte') ? [ 'utf8' ] : [ 'latin1' ]
+  " Nvim: only utf8 is supported.
+  let encodings = ['utf8']
   let encoding_save = &encoding
 
   for e in encodings
@@ -542,11 +621,9 @@ func Test_cmdline_overstrike()
     call assert_equal('"ab0cd3ef4', @:)
   endfor
 
-  if has('multi_byte')
-    " Test overstrike with multi-byte characters.
-    call feedkeys(":\"テキストエディタ\<home>\<right>\<right>ab\<right>\<insert>cd\<enter>", 'xt')
-    call assert_equal('"テabキcdエディタ', @:)
-  endif
+  " Test overstrike with multi-byte characters.
+  call feedkeys(":\"テキストエディタ\<home>\<right>\<right>ab\<right>\<insert>cd\<enter>", 'xt')
+  call assert_equal('"テabキcdエディタ', @:)
 
   let &encoding = encoding_save
 endfunc

@@ -12,6 +12,7 @@
 #include "nvim/ascii.h"
 #include "nvim/vim.h"
 #include "nvim/main.h"
+#include "nvim/aucmd.h"
 #include "nvim/buffer.h"
 #include "nvim/charset.h"
 #include "nvim/diff.h"
@@ -49,10 +50,12 @@
 #include "nvim/popupmnu.h"
 #include "nvim/quickfix.h"
 #include "nvim/screen.h"
+#include "nvim/sign.h"
 #include "nvim/state.h"
 #include "nvim/strings.h"
 #include "nvim/syntax.h"
 #include "nvim/ui.h"
+#include "nvim/ui_compositor.h"
 #include "nvim/version.h"
 #include "nvim/window.h"
 #include "nvim/shada.h"
@@ -114,12 +117,12 @@ typedef struct {
   char *listen_addr;                    // --listen {address}
 } mparm_T;
 
-/* Values for edit_type. */
-#define EDIT_NONE   0       /* no edit type yet */
-#define EDIT_FILE   1       /* file name argument[s] given, use argument list */
-#define EDIT_STDIN  2       /* read file from stdin */
-#define EDIT_TAG    3       /* tag name argument given, use tagname */
-#define EDIT_QF     4       /* start in quickfix mode */
+// Values for edit_type.
+#define EDIT_NONE   0       // no edit type yet
+#define EDIT_FILE   1       // file name argument[s] given, use argument list
+#define EDIT_STDIN  2       // read file from stdin
+#define EDIT_TAG    3       // tag name argument given, use tagname
+#define EDIT_QF     4       // start in quickfix mode
 
 #ifdef INCLUDE_GENERATED_DECLARATIONS
 # include "main.c.generated.h"
@@ -140,15 +143,14 @@ static const char *err_extra_cmd =
 
 void event_init(void)
 {
+  log_init();
   loop_init(&main_loop, NULL);
+  resize_events = multiqueue_new_child(main_loop.events);
+
   // early msgpack-rpc initialization
   msgpack_rpc_init_method_table();
   msgpack_rpc_helpers_init();
-  // Initialize input events
   input_init();
-  // Timer to wake the event loop if a timeout argument is passed to
-  // `event_poll`
-  // Signals
   signal_init();
   // finish mspgack-rpc initialization
   channel_init();
@@ -184,7 +186,6 @@ bool event_teardown(void)
 /// Needed for unit tests. Must be called after `time_init()`.
 void early_init(void)
 {
-  log_init();
   env_init();
   fs_init();
   handle_init();
@@ -221,6 +222,9 @@ void early_init(void)
   TIME_MSG("inits 1");
 
   set_lang_var();               // set v:lang and v:ctype
+
+  init_signs();
+  ui_comp_syn_init();
 }
 
 #ifdef MAKE_LIB
@@ -236,7 +240,7 @@ int main(int argc, char **argv)
   char **argv = xmalloc((size_t)argc * sizeof(char *));
   for (int i = 0; i < argc; i++) {
     char *buf = NULL;
-    utf16_to_utf8(argv_w[i], &buf);
+    utf16_to_utf8(argv_w[i], -1, &buf);
     assert(buf);
     argv[i] = buf;
   }
@@ -256,12 +260,13 @@ int main(int argc, char **argv)
 
   init_startuptime(&params);
 
+  event_init();
+
   early_init();
 
   // Check if we have an interactive window.
   check_and_set_isatty(&params);
 
-  event_init();
   // Process the command line arguments.  File names are put in the global
   // argument list "global_alist".
   command_line_scan(&params);
@@ -315,28 +320,9 @@ int main(int argc, char **argv)
   // Set the break level after the terminal is initialized.
   debug_break_level = params.use_debug_break_level;
 
-  //
-  // Read user-input if any TTY is connected.
   // Read ex-commands if invoked with "-es".
-  //
-  bool reading_tty = !headless_mode
-                     && !embedded_mode
-                     && !silent_mode
-                     && (params.input_isatty || params.output_isatty
-                         || params.err_isatty);
-  bool reading_excmds = !params.input_isatty
-                        && silent_mode
-                        && exmode_active == EXMODE_NORMAL;
-  if (reading_tty || reading_excmds) {
-    // One of the startup commands (arguments, sourced scripts or plugins) may
-    // prompt the user, so start reading from a tty now.
-    int fd = STDIN_FILENO;
-    if (!silent_mode
-        && (!params.input_isatty || params.edit_type == EDIT_STDIN)) {
-      // Use stderr or stdout since stdin is being used to read commands.
-      fd = params.err_isatty ? fileno(stderr) : fileno(stdout);
-    }
-    input_start(fd);
+  if (!params.input_isatty && silent_mode && exmode_active == EXMODE_NORMAL) {
+    input_start(STDIN_FILENO);
   }
 
   // open terminals when opening files that start with term://
@@ -361,20 +347,23 @@ int main(int argc, char **argv)
     p_lpl = false;
   }
 
-  // give embedders a chance to set up nvim, by processing a request before
-  // startup. This allows an external UI to show messages and prompts from
-  // --cmd and buffer loading (e.g. swap files)
-  bool early_ui = false;
-  if (embedded_mode && !headless_mode) {
-    TIME_MSG("waiting for embedder to make request");
-    remote_ui_wait_for_attach();
-    TIME_MSG("done waiting for embedder");
+  // Wait for UIs to set up Nvim or show early messages
+  // and prompts (--cmd, swapfile dialog, …).
+  bool use_remote_ui = (embedded_mode && !headless_mode);
+  bool use_builtin_ui = (!headless_mode && !embedded_mode && !silent_mode);
+  if (use_remote_ui || use_builtin_ui) {
+    TIME_MSG("waiting for UI");
+    if (use_remote_ui) {
+      remote_ui_wait_for_attach();
+    } else {
+      ui_builtin_start();
+    }
+    TIME_MSG("done waiting for UI");
 
     // prepare screen now, so external UIs can display messages
     starting = NO_BUFFERS;
     screenclear();
-    early_ui = true;
-    TIME_MSG("initialized screen early for embedder");
+    TIME_MSG("initialized screen early for UI");
   }
 
   // Execute --cmd arguments.
@@ -410,8 +399,7 @@ int main(int argc, char **argv)
     mch_exit(0);
   }
 
-  // Set a few option defaults after reading vimrc files: 'title', 'icon',
-  // 'shellpipe', 'shellredir'.
+  // Set some option defaults after reading vimrc files.
   set_init_3();
   TIME_MSG("inits 3");
 
@@ -468,25 +456,12 @@ int main(int argc, char **argv)
     read_stdin();
   }
 
-  if (reading_tty && (need_wait_return || msg_didany)) {
-    // Because there's no UI yet, error messages would have been printed to
-    // stdout.  Before starting we need confirmation that the user has seen the
-    // messages and that is done with a call to wait_return.
-    TIME_MSG("waiting for return");
-    wait_return(true);
-  }
-
-  if (!headless_mode && !embedded_mode && !silent_mode) {
-    input_stop();  // Stop reading input, let the UI take over.
-    ui_builtin_start();
-  }
-
   setmouse();  // may start using the mouse
 
-  if (exmode_active || early_ui) {
-    // Don't clear the screen when starting in Ex mode, or when an
-    // embedding UI might have displayed messages
-    must_redraw = CLEAR;
+  if (exmode_active || use_remote_ui || use_builtin_ui) {
+    // Don't clear the screen when starting in Ex mode, or when a UI might have
+    // displayed messages.
+    redraw_later(VALID);
   } else {
     screenclear();  // clear screen
     TIME_MSG("clearing screen");
@@ -563,6 +538,10 @@ int main(int argc, char **argv)
   set_vim_var_nr(VV_VIM_DID_ENTER, 1L);
   apply_autocmds(EVENT_VIMENTER, NULL, NULL, false, curbuf);
   TIME_MSG("VimEnter autocommands");
+  if (use_remote_ui || use_builtin_ui) {
+    do_autocmd_uienter(use_remote_ui ? CHAN_STDIO : 0, true);
+    TIME_MSG("UIEnter autocommands");
+  }
 
   // Adjust default register name for "unnamed" in 'clipboard'. Can only be
   // done after the clipboard is available and all initial commands that may
@@ -606,9 +585,7 @@ int main(int argc, char **argv)
 void getout(int exitval)
   FUNC_ATTR_NORETURN
 {
-  tabpage_T   *tp, *next_tp;
-
-  exiting = TRUE;
+  exiting = true;
 
   /* When running in Ex mode an error causes us to exit with a non-zero exit
    * code.  POSIX requires this, although it's not 100% clear from the
@@ -618,15 +595,17 @@ void getout(int exitval)
 
   set_vim_var_nr(VV_EXITING, exitval);
 
-  /* Position the cursor on the last screen line, below all the text */
-  ui_cursor_goto((int)Rows - 1, 0);
+  // Position the cursor on the last screen line, below all the text
+  ui_cursor_goto(Rows - 1, 0);
 
   /* Optionally print hashtable efficiency. */
   hash_debug_results();
 
   if (get_vim_var_nr(VV_DYING) <= 1) {
-    /* Trigger BufWinLeave for all windows, but only once per buffer. */
-    for (tp = first_tabpage; tp != NULL; tp = next_tp) {
+    const tabpage_T *next_tp;
+
+    // Trigger BufWinLeave for all windows, but only once per buffer.
+    for (const tabpage_T *tp = first_tabpage; tp != NULL; tp = next_tp) {
       next_tp = tp->tp_next;
       FOR_ALL_WINDOWS_IN_TAB(wp, tp) {
         if (wp->w_buffer == NULL) {
@@ -683,17 +662,14 @@ void getout(int exitval)
     wait_return(FALSE);
   }
 
-  /* Position the cursor again, the autocommands may have moved it */
-  ui_cursor_goto((int)Rows - 1, 0);
+  // Position the cursor again, the autocommands may have moved it
+  ui_cursor_goto(Rows - 1, 0);
 
   // Apply 'titleold'.
   if (p_title && *p_titleold != NUL) {
     ui_call_set_title(cstr_as_string((char *)p_titleold));
   }
 
-#if defined(USE_ICONV) && defined(DYNAMIC_ICONV)
-  iconv_end();
-#endif
   cs_end();
   if (garbage_collect_at_exit) {
     garbage_collect(false);
@@ -737,22 +713,14 @@ static void init_locale(void)
   setlocale(LC_NUMERIC, "C");
 # endif
 
-# ifdef LOCALE_INSTALL_DIR    // gnu/linux standard: $prefix/share/locale
-  bindtextdomain(PROJECT_NAME, LOCALE_INSTALL_DIR);
-# else                        // old vim style: $runtime/lang
-  {
-    char_u  *p;
-
-    // expand_env() doesn't work yet, because g_chartab[] is not
-    // initialized yet, call vim_getenv() directly
-    p = (char_u *)vim_getenv("VIMRUNTIME");
-    if (p != NULL && *p != NUL) {
-      vim_snprintf((char *)NameBuff, MAXPATHL, "%s/lang", p);
-      bindtextdomain(PROJECT_NAME, (char *)NameBuff);
-    }
-    xfree(p);
-  }
-# endif
+  char localepath[MAXPATHL] = { 0 };
+  snprintf(localepath, sizeof(localepath), "%s", get_vim_var_str(VV_PROGPATH));
+  char *tail = (char *)path_tail_with_sep((char_u *)localepath);
+  *tail = NUL;
+  tail = (char *)path_tail((char_u *)localepath);
+  xstrlcpy(tail, "share/locale",
+           sizeof(localepath) - (size_t)(tail - localepath));
+  bindtextdomain(PROJECT_NAME, localepath);
   textdomain(PROJECT_NAME);
   TIME_MSG("locale set");
 }
@@ -807,6 +775,7 @@ static void command_line_scan(mparm_T *parmp)
           if (exmode_active) {
             // "nvim -e -" silent mode
             silent_mode = true;
+            parmp->no_swap_file = true;
           } else {
             if (parmp->edit_type != EDIT_NONE
                 && parmp->edit_type != EDIT_FILE
@@ -870,6 +839,9 @@ static void command_line_scan(mparm_T *parmp)
           } else if (STRNICMP(argv[0] + argv_idx, "startuptime", 11) == 0) {
             want_argument = true;
             argv_idx += 11;
+          } else if (STRNICMP(argv[0] + argv_idx, "clean", 5) == 0) {
+            parmp->use_vimrc = "NONE";
+            set_option_value("shadafile", 0L, "NONE", 0);
           } else {
             if (argv[0][argv_idx])
               mainerr(err_opt_unknown, argv[0]);
@@ -990,6 +962,7 @@ static void command_line_scan(mparm_T *parmp)
         case 's': {
           if (exmode_active) {    // "-es" silent (batch) Ex-mode
             silent_mode = true;
+            parmp->no_swap_file = true;
           } else {                // "-s {scriptin}" read from script file
             want_argument = true;
           }
@@ -1127,7 +1100,7 @@ static void command_line_scan(mparm_T *parmp)
           }
 
           case 'i': {  // "-i {shada}" use for shada
-            used_shada_file = argv[0];
+            set_option_value("shadafile", 0L, argv[0], 0);
             break;
           }
 
@@ -1196,8 +1169,8 @@ scripterror:
             if (scriptout != NULL) {
               goto scripterror;
             }
-            if ((scriptout = mch_fopen(argv[0],
-                    c == 'w' ? APPENDBIN : WRITEBIN)) == NULL) {
+            if ((scriptout = os_fopen(argv[0], c == 'w' ? APPENDBIN : WRITEBIN))
+                == NULL) {
               mch_errmsg(_("Cannot open for script output: \""));
               mch_errmsg(argv[0]);
               mch_errmsg("\"\n");
@@ -1250,6 +1223,10 @@ scripterror:
     }
   }
 
+  if (embedded_mode && silent_mode) {
+    mainerr(_("--embed conflicts with -es/-Es"), NULL);
+  }
+
   // If there is a "+123" or "-c" command, set v:swapcommand to the first one.
   if (parmp->n_commands > 0) {
     const size_t swcmd_len = STRLEN(parmp->commands[0]) + 3;
@@ -1285,8 +1262,9 @@ static void init_params(mparm_T *paramp, int argc, char **argv)
 static void init_startuptime(mparm_T *paramp)
 {
   for (int i = 1; i < paramp->argc; i++) {
-    if (STRICMP(paramp->argv[i], "--startuptime") == 0 && i + 1 < paramp->argc) {
-      time_fd = mch_fopen(paramp->argv[i + 1], "a");
+    if (STRICMP(paramp->argv[i], "--startuptime") == 0
+        && i + 1 < paramp->argc) {
+      time_fd = os_fopen(paramp->argv[i + 1], "a");
       time_start("--- NVIM STARTING ---");
       break;
     }
@@ -1515,10 +1493,11 @@ static void create_windows(mparm_T *parmp)
       dorewind = FALSE;
       curbuf = curwin->w_buffer;
       if (curbuf->b_ml.ml_mfp == NULL) {
-        /* Set 'foldlevel' to 'foldlevelstart' if it's not negative. */
-        if (p_fdls >= 0)
+        // Set 'foldlevel' to 'foldlevelstart' if it's not negative..
+        if (p_fdls >= 0) {
           curwin->w_p_fdl = p_fdls;
-        /* When getting the ATTENTION prompt here, use a dialog */
+        }
+        // When getting the ATTENTION prompt here, use a dialog.
         swap_exists_action = SEA_DIALOG;
         set_buflisted(TRUE);
 
@@ -1565,6 +1544,7 @@ static void edit_buffers(mparm_T *parmp, char_u *cwd)
   int i;
   bool advance = true;
   win_T       *win;
+  char *p_shm_save = NULL;
 
   /*
    * Don't execute Win/Buf Enter/Leave autocommands here
@@ -1596,6 +1576,16 @@ static void edit_buffers(mparm_T *parmp, char_u *cwd)
         if (curtab->tp_next == NULL)            /* just checking */
           break;
         goto_tabpage(0);
+        // Temporarily reset 'shm' option to not print fileinfo when
+        // loading the other buffers. This would overwrite the already
+        // existing fileinfo for the first tab.
+        if (i == 1) {
+          char buf[100];
+
+          p_shm_save = xstrdup((char *)p_shm);
+          snprintf(buf, sizeof(buf), "F%s", p_shm);
+          set_option_value("shm", 0L, buf, 0);
+        }
       } else {
         if (curwin->w_next == NULL)             /* just checking */
           break;
@@ -1636,6 +1626,11 @@ static void edit_buffers(mparm_T *parmp, char_u *cwd)
     }
   }
 
+  if (p_shm_save != NULL) {
+    set_option_value("shm", 0L, p_shm_save, 0);
+    xfree(p_shm_save);
+  }
+
   if (parmp->window_layout == WIN_TABS)
     goto_tabpage(1);
   --autocmd_no_enter;
@@ -1670,11 +1665,12 @@ static void exe_pre_commands(mparm_T *parmp)
   if (cnt > 0) {
     curwin->w_cursor.lnum = 0;     /* just in case.. */
     sourcing_name = (char_u *)_("pre-vimrc command line");
-    current_SID = SID_CMDARG;
-    for (i = 0; i < cnt; ++i)
+    current_sctx.sc_sid = SID_CMDARG;
+    for (i = 0; i < cnt; i++) {
       do_cmdline_cmd(cmds[i]);
+    }
     sourcing_name = NULL;
-    current_SID = 0;
+    current_sctx.sc_sid = 0;
     TIME_MSG("--cmd commands");
   }
 }
@@ -1695,16 +1691,18 @@ static void exe_commands(mparm_T *parmp)
   if (parmp->tagname == NULL && curwin->w_cursor.lnum <= 1)
     curwin->w_cursor.lnum = 0;
   sourcing_name = (char_u *)"command line";
-  current_SID = SID_CARG;
-  for (i = 0; i < parmp->n_commands; ++i) {
+  current_sctx.sc_sid = SID_CARG;
+  current_sctx.sc_seq = 0;
+  for (i = 0; i < parmp->n_commands; i++) {
     do_cmdline_cmd(parmp->commands[i]);
     if (parmp->cmds_tofree[i])
       xfree(parmp->commands[i]);
   }
   sourcing_name = NULL;
-  current_SID = 0;
-  if (curwin->w_cursor.lnum == 0)
+  current_sctx.sc_sid = 0;
+  if (curwin->w_cursor.lnum == 0) {
     curwin->w_cursor.lnum = 1;
+  }
 
   if (!exmode_active)
     msg_scroll = FALSE;
@@ -1890,12 +1888,14 @@ static int execute_env(char *env)
     linenr_T save_sourcing_lnum = sourcing_lnum;
     sourcing_name = (char_u *)env;
     sourcing_lnum = 0;
-    scid_T save_sid = current_SID;
-    current_SID = SID_ENV;
+    const sctx_T save_current_sctx = current_sctx;
+    current_sctx.sc_sid = SID_ENV;
+    current_sctx.sc_seq = 0;
+    current_sctx.sc_lnum = 0;
     do_cmdline_cmd((char *)initstr);
     sourcing_name = save_sourcing_name;
     sourcing_lnum = save_sourcing_lnum;
-    current_SID = save_sid;
+    current_sctx = save_current_sctx;
     return OK;
   }
   return FAIL;

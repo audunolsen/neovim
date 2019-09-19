@@ -38,9 +38,10 @@ endfunction
 " Handler for s:system() function.
 function! s:system_handler(jobid, data, event) dict abort
   if a:event ==# 'stderr'
-    let self.stderr .= join(a:data, '')
-    if !self.ignore_stderr
+    if self.add_stderr_to_output
       let self.output .= join(a:data, '')
+    else
+      let self.stderr .= join(a:data, '')
     endif
   elseif a:event ==# 'stdout'
     let self.output .= join(a:data, '')
@@ -64,7 +65,7 @@ function! s:system(cmd, ...) abort
   let stdin = a:0 ? a:1 : ''
   let ignore_error = a:0 > 2 ? a:3 : 0
   let opts = {
-        \ 'ignore_stderr': a:0 > 1 ? a:2 : 0,
+        \ 'add_stderr_to_output': a:0 > 1 ? a:2 : 0,
         \ 'output': '',
         \ 'stderr': '',
         \ 'on_stdout': function('s:system_handler'),
@@ -89,8 +90,15 @@ function! s:system(cmd, ...) abort
     call health#report_error(printf('Command timed out: %s', s:shellify(a:cmd)))
     call jobstop(jobid)
   elseif s:shell_error != 0 && !ignore_error
-    call health#report_error(printf("Command error (job=%d, exit code %d): `%s` (in %s)\nOutput: %s\nStderr: %s",
-          \ jobid, s:shell_error, s:shellify(a:cmd), string(getcwd()), opts.output, opts.stderr))
+    let emsg = printf("Command error (job=%d, exit code %d): `%s` (in %s)",
+          \ jobid, s:shell_error, s:shellify(a:cmd), string(getcwd()))
+    if !empty(opts.output)
+      let emsg .= "\noutput: " . opts.output
+    end
+    if !empty(opts.stderr)
+      let emsg .= "\nstderr: " . opts.stderr
+    end
+    call health#report_error(emsg)
   endif
 
   return opts.output
@@ -106,7 +114,8 @@ endfunction
 
 " Fetch the contents of a URL.
 function! s:download(url) abort
-  if executable('curl')
+  let has_curl = executable('curl')
+  if has_curl && system(['curl', '-V']) =~# 'Protocols:.*https'
     let rv = s:system(['curl', '-sL', a:url], '', 1, 1)
     return s:shell_error ? 'curl error with '.a:url.': '.s:shell_error : rv
   elseif executable('python')
@@ -124,7 +133,9 @@ function! s:download(url) abort
           \ ? 'python urllib.request error: '.s:shell_error
           \ : rv
   endif
-  return 'missing `curl` and `python`, cannot make pypi request'
+  return 'missing `curl` '
+          \ .(has_curl ? '(with HTTPS support) ' : '')
+          \ .'and `python`, cannot make web request'
 endfunction
 
 " Check for clipboard tools.
@@ -561,7 +572,10 @@ function! s:check_node() abort
   endif
   call health#report_info('Neovim node.js host: '. host)
 
-  let latest_npm_cmd = has('win32') ? 'cmd /c npm info neovim --json' : 'npm info neovim --json'
+  let manager = executable('npm') ? 'npm' : 'yarn'
+  let latest_npm_cmd = has('win32') ?
+        \ 'cmd /c '. manager .' info neovim --json' :
+        \ manager .' info neovim --json'
   let latest_npm = s:system(split(latest_npm_cmd))
   if s:shell_error || empty(latest_npm)
     call health#report_error('Failed to run: '. latest_npm_cmd,
@@ -590,7 +604,8 @@ function! s:check_node() abort
     call health#report_warn(
           \ printf('Package "neovim" is out-of-date. Installed: %s, latest: %s',
           \ current_npm, latest_npm),
-          \ ['Run in shell: npm install -g neovim'])
+          \ ['Run in shell: npm install -g neovim',
+          \  'Run in shell (if you use yarn): yarn global add neovim'])
   else
     call health#report_ok('Latest "neovim" npm/yarn package is installed: '. current_npm)
   endif

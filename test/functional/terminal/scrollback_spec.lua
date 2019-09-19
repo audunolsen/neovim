@@ -10,8 +10,8 @@ local wait = helpers.wait
 local retry = helpers.retry
 local curbufmeths = helpers.curbufmeths
 local nvim = helpers.nvim
-local expect_err = helpers.expect_err
 local feed_data = thelpers.feed_data
+local pcall_err = helpers.pcall_err
 
 describe(':terminal scrollback', function()
   local screen
@@ -142,15 +142,15 @@ describe(':terminal scrollback', function()
     describe('and height decreased by 1', function()
       if helpers.pending_win32(pending) then return end
       local function will_hide_top_line()
-        feed([[<C-\><C-N>:]])  -- Go to cmdline-mode, so cursor is at bottom.
+        feed([[<C-\><C-N>]])
         screen:try_resize(screen._width - 2, screen._height - 1)
         screen:expect([[
           line2                       |
           line3                       |
           line4                       |
           rows: 5, cols: 28           |
-          {2: }                           |
-          :^                           |
+          {2:^ }                           |
+                                      |
         ]])
       end
 
@@ -166,11 +166,11 @@ describe(':terminal scrollback', function()
           screen:expect([[
             rows: 5, cols: 28         |
             rows: 3, cols: 26         |
-            {2: }                         |
-            :^                         |
+            {2:^ }                         |
+                                      |
           ]])
           eq(8, curbuf('line_count'))
-          feed([[<C-\><C-N>3k]])
+          feed([[3k]])
           screen:expect([[
             ^line4                     |
             rows: 5, cols: 28         |
@@ -403,12 +403,8 @@ describe("'scrollback' option", function()
     end
 
     curbufmeths.set_option('scrollback', 0)
-    if iswin() then
-      feed_data('for /L %I in (1,1,30) do @(echo line%I)\r')
-    else
-      feed_data('for i in $(seq 1 30); do echo "line$i"; done\n')
-    end
-    screen:expect{any='line30                        '}
+    feed_data(nvim_dir..'/shell-test REP 31 line'..(iswin() and '\r' or '\n'))
+    screen:expect{any='30: line                      '}
     retry(nil, nil, function() expect_lines(7) end)
 
     screen:detach()
@@ -428,13 +424,8 @@ describe("'scrollback' option", function()
     -- Wait for prompt.
     screen:expect{any='%$'}
 
-    if iswin() then
-      feed_data('for /L %I in (1,1,30) do @(echo line%I)\r')
-    else
-      feed_data('for i in $(seq 1 30); do echo "line$i"; done\n')
-    end
-
-    screen:expect{any='line30                        '}
+    feed_data(nvim_dir.."/shell-test REP 31 line"..(iswin() and '\r' or '\n'))
+    screen:expect{any='30: line                      '}
 
     retry(nil, nil, function() expect_lines(33, 2) end)
     curbufmeths.set_option('scrollback', 10)
@@ -445,18 +436,34 @@ describe("'scrollback' option", function()
     -- Terminal job data is received asynchronously, may happen before the
     -- 'scrollback' option is synchronized with the internal sb_buffer.
     command('sleep 100m')
+
+    feed_data(nvim_dir.."/shell-test REP 41 line"..(iswin() and '\r' or '\n'))
     if iswin() then
-      feed_data('for /L %I in (1,1,40) do @(echo line%I)\r')
+      screen:expect{grid=[[
+        37: line                      |
+        38: line                      |
+        39: line                      |
+        40: line                      |
+                                      |
+        ${1: }                            |
+        {3:-- TERMINAL --}                |
+      ]]}
     else
-      feed_data('for i in $(seq 1 40); do echo "line$i"; done\n')
+      screen:expect{grid=[[
+        36: line                      |
+        37: line                      |
+        38: line                      |
+        39: line                      |
+        40: line                      |
+        {IGNORE}|
+        {3:-- TERMINAL --}                |
+      ]]}
     end
+    expect_lines(58)
 
-    screen:expect{any='line40                        '}
-
-    retry(nil, nil, function() expect_lines(58) end)
     -- Verify off-screen state
-    eq((iswin() and 'line36' or 'line35'), eval("getline(line('w0') - 1)"))
-    eq((iswin() and 'line27' or 'line26'), eval("getline(line('w0') - 10)"))
+    eq((iswin() and '36: line' or '35: line'), eval("getline(line('w0') - 1)"))
+    eq((iswin() and '27: line' or '26: line'), eval("getline(line('w0') - 10)"))
 
     screen:detach()
   end)
@@ -468,8 +475,10 @@ describe("'scrollback' option", function()
   end)
 
   it('error if set to invalid value', function()
-    expect_err('E474:', command, 'set scrollback=-2')
-    expect_err('E474:', command, 'set scrollback=100001')
+    eq('Vim(set):E474: Invalid argument: scrollback=-2',
+      pcall_err(command, 'set scrollback=-2'))
+    eq('Vim(set):E474: Invalid argument: scrollback=100001',
+      pcall_err(command, 'set scrollback=100001'))
   end)
 
   it('defaults to -1 on normal buffers', function()

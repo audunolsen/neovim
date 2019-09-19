@@ -1221,7 +1221,8 @@ void tv_dict_watcher_notify(dict_T *const dict, const char *const key,
 
 /// Allocate a dictionary item
 ///
-/// @note that the value of the item (->di_tv) still needs to be initialized.
+/// @note that the type and value of the item (->di_tv) still needs to
+///       be initialized.
 ///
 /// @param[in]  key  Key, is copied to the new item.
 /// @param[in]  key_len  Key length.
@@ -1235,12 +1236,14 @@ dictitem_T *tv_dict_item_alloc_len(const char *const key, const size_t key_len)
   memcpy(di->di_key, key, key_len);
   di->di_key[key_len] = NUL;
   di->di_flags = DI_FLAGS_ALLOC;
+  di->di_tv.v_lock = VAR_UNLOCKED;
   return di;
 }
 
 /// Allocate a dictionary item
 ///
-/// @note that the value of the item (->di_tv) still needs to be initialized.
+/// @note that the type and value of the item (->di_tv) still needs to
+///       be initialized.
 ///
 /// @param[in]  key  Key, is copied to the new item.
 ///
@@ -1269,7 +1272,7 @@ void tv_dict_item_free(dictitem_T *const item)
 /// @param[in]  di  Item to copy.
 ///
 /// @return [allocated] new dictionary item.
-static dictitem_T *tv_dict_item_copy(dictitem_T *const di)
+dictitem_T *tv_dict_item_copy(dictitem_T *const di)
   FUNC_ATTR_NONNULL_RET FUNC_ATTR_NONNULL_ALL FUNC_ATTR_WARN_UNUSED_RESULT
 {
   dictitem_T *const new_di = tv_dict_item_alloc((const char *)di->di_key);
@@ -1572,7 +1575,6 @@ int tv_dict_add_list(dict_T *const d, const char *const key,
 {
   dictitem_T *const item = tv_dict_item_alloc_len(key, key_len);
 
-  item->di_tv.v_lock = VAR_UNLOCKED;
   item->di_tv.v_type = VAR_LIST;
   item->di_tv.vval.v_list = list;
   tv_list_ref(list);
@@ -1597,7 +1599,6 @@ int tv_dict_add_dict(dict_T *const d, const char *const key,
 {
   dictitem_T *const item = tv_dict_item_alloc_len(key, key_len);
 
-  item->di_tv.v_lock = VAR_UNLOCKED;
   item->di_tv.v_type = VAR_DICT;
   item->di_tv.vval.v_dict = dict;
   dict->dv_refcount++;
@@ -1621,7 +1622,6 @@ int tv_dict_add_nr(dict_T *const d, const char *const key,
 {
   dictitem_T *const item = tv_dict_item_alloc_len(key, key_len);
 
-  item->di_tv.v_lock = VAR_UNLOCKED;
   item->di_tv.v_type = VAR_NUMBER;
   item->di_tv.vval.v_number = nr;
   if (tv_dict_add(d, item) == FAIL) {
@@ -1644,7 +1644,6 @@ int tv_dict_add_special(dict_T *const d, const char *const key,
 {
   dictitem_T *const item = tv_dict_item_alloc_len(key, key_len);
 
-  item->di_tv.v_lock = VAR_UNLOCKED;
   item->di_tv.v_type = VAR_SPECIAL;
   item->di_tv.vval.v_special = val;
   if (tv_dict_add(d, item) == FAIL) {
@@ -1656,18 +1655,34 @@ int tv_dict_add_special(dict_T *const d, const char *const key,
 
 /// Add a string entry to dictionary
 ///
-/// @param[out]  d  Dictionary to add entry to.
-/// @param[in]  key  Key to add.
-/// @param[in]  key_len  Key length.
-/// @param[in]  val  String to add.
-///
-/// @return OK in case of success, FAIL when key already exists.
+/// @see tv_dict_add_allocated_str
 int tv_dict_add_str(dict_T *const d,
                     const char *const key, const size_t key_len,
                     const char *const val)
   FUNC_ATTR_NONNULL_ALL
 {
   return tv_dict_add_allocated_str(d, key, key_len, xstrdup(val));
+}
+
+/// Add a string entry to dictionary
+///
+/// @param[out]  d  Dictionary to add entry to.
+/// @param[in]  key  Key to add.
+/// @param[in]  key_len  Key length.
+/// @param[in]  val  String to add. NULL adds empty string.
+/// @param[in]  len  Use this many bytes from `val`, or -1 for whole string.
+///
+/// @return OK in case of success, FAIL when key already exists.
+int tv_dict_add_str_len(dict_T *const d,
+                        const char *const key, const size_t key_len,
+                        char *const val, int len)
+  FUNC_ATTR_NONNULL_ARG(1, 2)
+{
+  char *s = val ? val : "";
+  if (val != NULL) {
+    s = (len < 0) ? xstrdup(val) : xstrndup(val, (size_t)len);
+  }
+  return tv_dict_add_allocated_str(d, key, key_len, s);
 }
 
 /// Add a string entry to dictionary
@@ -1690,7 +1705,6 @@ int tv_dict_add_allocated_str(dict_T *const d,
 {
   dictitem_T *const item = tv_dict_item_alloc_len(key, key_len);
 
-  item->di_tv.v_lock = VAR_UNLOCKED;
   item->di_tv.v_type = VAR_STRING;
   item->di_tv.vval.v_string = (char_u *)val;
   if (tv_dict_add(d, item) == FAIL) {

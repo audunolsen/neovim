@@ -17,9 +17,9 @@ func Test_mksession()
     \   '    four leadinG spaces',
     \   'two		consecutive tabs',
     \   'two	tabs	in one line',
-    \   'one ä multibyteCharacter',
-    \   'aä Ä  two multiByte characters',
-    \   'Aäöü  three mulTibyte characters',
+    \   'one Ã¤ multibyteCharacter',
+    \   'aÃ¤ Ã„  two multiByte characters',
+    \   'AÃ¤Ã¶Ã¼  three mulTibyte characters',
     \   'short line',
     \ ])
   let tmpfile = 'Xtemp'
@@ -106,11 +106,20 @@ endfunc
 
 func Test_mksession_winheight()
   new
-  set winheight=10 winminheight=2
+  set winheight=10
+  set winminheight=2
   mksession! Xtest_mks.out
   source Xtest_mks.out
 
   call delete('Xtest_mks.out')
+endfunc
+
+func Test_mksession_large_winheight()
+  set winheight=999
+  mksession! Xtest_mks_winheight.out
+  set winheight&
+  source Xtest_mks_winheight.out
+  call delete('Xtest_mks_winheight.out')
 endfunc
 
 " Verify that arglist is stored correctly to the session file.
@@ -206,11 +215,10 @@ func Test_mkview_loadview_with_viewdir()
 
   " The directory Xviewdir/ should have been created and the view
   " should be stored in that directory.
-  let pathsep = has('win32') ? '\' : '/'
-  call assert_equal('Xviewdir' . pathsep .
+  call assert_equal('Xviewdir/' .
         \           substitute(
         \             substitute(
-        \               expand('%:p'), pathsep, '=+', 'g'), ':', '=-', 'g') . '=1.vim',
+        \               expand('%:p'), '/', '=+', 'g'), ':', '=-', 'g') . '=1.vim',
         \           glob('Xviewdir/*'))
   call assert_equal(1, &number)
   call assert_match('\*:mkview\*$', getline('.'))
@@ -238,18 +246,76 @@ func Test_mkview_no_file_name()
   %bwipe
 endfunc
 
-func Test_mksession_quote_in_filename()
+" A clean session (one empty buffer, one window, and one tab) should not
+" set any error messages when sourced because no commands should fail.
+func Test_mksession_no_errmsg()
   let v:errmsg = ''
   %bwipe!
+  mksession! Xtest_mks.out
+  source Xtest_mks.out
+  call assert_equal('', v:errmsg)
+  call delete('Xtest_mks.out')
+endfunc
+
+func Test_mksession_quote_in_filename()
+  if !has('unix')
+    " only Unix can handle this weird filename
+    return
+  endif
+  let v:errmsg = ''
+  let filename = has('win32') ? 'x''y' : 'x''y"z'
+  %bwipe!
   split another
-  split x'y\"z
+  execute 'split' escape(filename, '"')
   mksession! Xtest_mks_quoted.out
   %bwipe!
   source Xtest_mks_quoted.out
-  call assert_true(bufexists("x'y\"z"))
+  call assert_true(bufexists(filename))
 
   %bwipe!
   call delete('Xtest_mks_quoted.out')
+endfunc
+
+func s:ClearMappings()
+  mapclear
+  omapclear
+  mapclear!
+  lmapclear
+  tmapclear
+endfunc
+
+func Test_mkvimrc()
+  let entries = [
+        \ ['', 'nothing', '<Nop>'],
+        \ ['n', 'normal', 'NORMAL'],
+        \ ['v', 'visual', 'VISUAL'],
+        \ ['s', 'select', 'SELECT'],
+        \ ['x', 'visualonly', 'VISUALONLY'],
+        \ ['o', 'operator', 'OPERATOR'],
+        \ ['i', 'insert', 'INSERT'],
+        \ ['l', 'lang', 'LANG'],
+        \ ['c', 'command', 'COMMAND'],
+        \ ['t', 'terminal', 'TERMINAL'],
+        \ ]
+  for entry in entries
+    exe entry[0] .. 'map ' .. entry[1] .. ' ' .. entry[2]
+  endfor
+
+  mkvimrc Xtestvimrc
+
+  call s:ClearMappings()
+  for entry in entries
+    call assert_equal('', maparg(entry[1], entry[0]))
+  endfor
+
+  source Xtestvimrc
+
+  for entry in entries
+    call assert_equal(entry[2], maparg(entry[1], entry[0]))
+  endfor
+
+  call s:ClearMappings()
+  call delete('Xtestvimrc')
 endfunc
 
 " vim: shiftwidth=2 sts=2 expandtab

@@ -7,6 +7,7 @@ local eq, call, clear, eval, feed_command, feed, nvim =
 local command = helpers.command
 local exc_exec = helpers.exc_exec
 local iswin = helpers.iswin
+local os_kill = helpers.os_kill
 
 local Screen = require('test.functional.ui.screen')
 
@@ -20,14 +21,6 @@ end
 local function delete_file(name)
   return function()
     eval("delete('"..name.."')")
-  end
-end
-
--- Some tests require the xclip program and a x server.
-local xclip = nil
-do
-  if os.getenv('DISPLAY') then
-    xclip = (os.execute('command -v xclip > /dev/null 2>&1') == 0)
   end
 end
 
@@ -203,12 +196,15 @@ describe('system()', function()
     end)
 
     it('prints verbose information', function()
+      nvim('set_option', 'shell', 'fake_shell')
+      nvim('set_option', 'shellcmdflag', 'cmdflag')
+
       screen:try_resize(72, 14)
       feed(':4verbose echo system("echo hi")<cr>')
       if iswin() then
-        screen:expect{any=[[Executing command: "'cmd.exe' '/s' '/c' '"echo hi"'"]]}
+        screen:expect{any=[[Executing command: "'fake_shell' 'cmdflag' '"echo hi"'"]]}
       else
-        screen:expect{any=[[Executing command: "'/[^']*sh' '%-c' 'echo hi'"]]}
+        screen:expect{any=[[Executing command: "'fake_shell' 'cmdflag' 'echo hi'"]]}
       end
       feed('<cr>')
     end)
@@ -272,7 +268,7 @@ describe('system()', function()
         ~                                                    |
         ~                                                    |
         ~                                                    |
-        Type  :qa!  and press <E...all changes and exit Nvim |
+        Type  :qa  and press <Enter> to exit Nvim            |
       ]])
     end)
   end)
@@ -375,15 +371,10 @@ describe('system()', function()
     end)
   end)
 
-  describe("with a program that doesn't close stdout", function()
-    if not xclip then
-      pending('missing `xclip`', function() end)
-    else
-      it('will exit properly after passing input', function()
-        eq('', eval([[system('xclip -i -loops 1 -selection clipboard', 'clip-data')]]))
-        eq('clip-data', eval([[system('xclip -o -selection clipboard')]]))
-      end)
-    end
+  it("with a program that doesn't close stdout will exit properly after passing input", function()
+    local out = eval(string.format("system('%s', 'clip-data')", nvim_dir..'/streams-test'))
+    assert(out:sub(0, 5) == 'pid: ', out)
+    os_kill(out:match("%d+"))
   end)
 end)
 
@@ -478,7 +469,7 @@ describe('systemlist()', function()
         ~                                                    |
         ~                                                    |
         ~                                                    |
-        Type  :qa!  and press <E...all changes and exit Nvim |
+        Type  :qa  and press <Enter> to exit Nvim            |
       ]])
     end)
   end)
@@ -559,16 +550,9 @@ describe('systemlist()', function()
     end)
   end)
 
-  describe("with a program that doesn't close stdout", function()
-    if not xclip then
-      pending('missing `xclip`', function() end)
-    else
-      it('will exit properly after passing input', function()
-        eq({}, eval(
-          "systemlist('xclip -i -loops 1 -selection clipboard', ['clip', 'data'])"))
-        eq({'clip', 'data'}, eval(
-          "systemlist('xclip -o -selection clipboard')"))
-      end)
-    end
+  it("with a program that doesn't close stdout will exit properly after passing input", function()
+    local out = eval(string.format("systemlist('%s', 'clip-data')", nvim_dir..'/streams-test'))
+    assert(out[1]:sub(0, 5) == 'pid: ', out)
+    os_kill(out[1]:match("%d+"))
   end)
 end)

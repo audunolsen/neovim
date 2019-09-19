@@ -9,7 +9,8 @@
 
 typedef struct term_input {
   int in_fd;
-  bool paste_enabled;
+  // Phases: -1=all 0=disabled 1=first-chunk 2=continue 3=last-chunk
+  int8_t paste;
   bool waiting;
   TermKey *tk;
 #if TERMKEY_VERSION_MAJOR > 0 || TERMKEY_VERSION_MINOR > 18
@@ -17,9 +18,6 @@ typedef struct term_input {
 #endif
   TimeWatcher timer_handle;
   Loop *loop;
-#ifdef WIN32
-  uv_tty_t tty_in;
-#endif
   Stream read_stream;
   RBuffer *key_buffer;
   uv_mutex_t key_buffer_mutex;

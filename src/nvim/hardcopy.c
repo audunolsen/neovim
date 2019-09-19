@@ -8,7 +8,6 @@
 #include <assert.h>
 #include <string.h>
 #include <inttypes.h>
-#include <stdint.h>
 
 #include "nvim/vim.h"
 #include "nvim/ascii.h"
@@ -326,7 +325,7 @@ static char_u *parse_list_options(char_u *option_str, option_table_T *table,
         break;
       }
 
-      table[idx].number = getdigits_int(&p);
+      table[idx].number = getdigits_int(&p, false, 0);
     }
 
     table[idx].string = p;
@@ -582,9 +581,9 @@ static void prt_header(prt_settings_T *const psettings, const int pagenum,
  */
 static void prt_message(char_u *s)
 {
-  grid_fill(&default_grid, (int)Rows - 1, (int)Rows, 0, (int)Columns, ' ', ' ',
-            0);
-  grid_puts(&default_grid, s, (int)Rows - 1, 0, HL_ATTR(HLF_R));
+  // TODO(bfredl): delete this
+  grid_fill(&default_grid, Rows - 1, Rows, 0, Columns, ' ', ' ', 0);
+  grid_puts(&default_grid, s, Rows - 1, 0, HL_ATTR(HLF_R));
   ui_flush();
 }
 
@@ -1670,7 +1669,7 @@ static int prt_open_resource(struct prt_ps_resource_S *resource)
   FILE        *fd_resource;
   struct prt_dsc_line_S dsc_line;
 
-  fd_resource = mch_fopen((char *)resource->filename, READBIN);
+  fd_resource = os_fopen((char *)resource->filename, READBIN);
   if (fd_resource == NULL) {
     EMSG2(_("E624: Can't open file \"%s\""), resource->filename);
     return FALSE;
@@ -1942,8 +1941,7 @@ void mch_print_cleanup(void)
     prt_file_error = FALSE;
   }
   if (prt_ps_file_name != NULL) {
-    xfree(prt_ps_file_name);
-    prt_ps_file_name = NULL;
+    XFREE_CLEAR(prt_ps_file_name);
   }
 }
 
@@ -2344,11 +2342,11 @@ int mch_print_init(prt_settings_T *psettings, char_u *jobname, int forceit)
       EMSG(_(e_notmp));
       return FAIL;
     }
-    prt_ps_fd = mch_fopen((char *)prt_ps_file_name, WRITEBIN);
+    prt_ps_fd = os_fopen((char *)prt_ps_file_name, WRITEBIN);
   } else {
     p = expand_env_save(psettings->outfile);
     if (p != NULL) {
-      prt_ps_fd = mch_fopen((char *)p, WRITEBIN);
+      prt_ps_fd = os_fopen((char *)p, WRITEBIN);
       xfree(p);
     }
   }
@@ -2383,7 +2381,7 @@ static int prt_add_resource(struct prt_ps_resource_S *resource)
   char_u resource_buffer[512];
   size_t bytes_read;
 
-  fd_resource = mch_fopen((char *)resource->filename, READBIN);
+  fd_resource = os_fopen((char *)resource->filename, READBIN);
   if (fd_resource == NULL) {
     EMSG2(_("E456: Can't open file \"%s\""), resource->filename);
     return FALSE;

@@ -19,6 +19,7 @@ struct process {
   Loop *loop;
   void *data;
   int pid, status, refcount;
+  uint8_t exit_signal;  // Signal used when killing (on Windows).
   uint64_t stopped_time;  // process_stop() timestamp
   const char *cwd;
   char **argv;
@@ -56,7 +57,8 @@ static inline Process process_init(Loop *loop, ProcessType type, void *data)
 
 static inline bool process_is_stopped(Process *proc)
 {
-  return proc->stopped_time != 0;
+  bool exited = (proc->status >= 0);
+  return exited || (proc->stopped_time != 0);
 }
 
 #ifdef INCLUDE_GENERATED_DECLARATIONS

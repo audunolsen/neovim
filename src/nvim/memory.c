@@ -9,6 +9,7 @@
 #include <stdbool.h>
 
 #include "nvim/vim.h"
+#include "nvim/context.h"
 #include "nvim/eval.h"
 #include "nvim/highlight.h"
 #include "nvim/memfile.h"
@@ -16,6 +17,7 @@
 #include "nvim/message.h"
 #include "nvim/misc1.h"
 #include "nvim/ui.h"
+#include "nvim/sign.h"
 #include "nvim/api/vim.h"
 
 #ifdef UNIT_TESTING
@@ -110,6 +112,8 @@ void *xmalloc(size_t size)
 }
 
 /// free() wrapper that delegates to the backing memory manager
+///
+/// @note Use XFREE_CLEAR() instead, if possible.
 void xfree(void *ptr)
 {
   free(ptr);
@@ -645,7 +649,7 @@ void free_all_mem(void)
   // Free all option values.  Must come after closing windows.
   free_all_options();
 
-  free_cmdline_buf();
+  free_arshape_buf();
 
   /* Clear registers. */
   clear_registers();
@@ -668,6 +672,7 @@ void free_all_mem(void)
 
   eval_clear();
   api_vim_free_all_mem();
+  ctx_free_all();
 
   // Free all buffers.  Reset 'autochdir' to avoid accessing things that
   // were freed already.

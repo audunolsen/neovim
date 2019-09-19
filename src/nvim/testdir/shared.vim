@@ -133,19 +133,28 @@ func s:kill_server(cmd)
   endif
 endfunc
 
-" Wait for up to a second for "expr" to become true.
+" Wait for up to five seconds for "expr" to become true.  "expr" can be a
+" stringified expression to evaluate, or a funcref without arguments.
+"
+" A second argument can be used to specify a different timeout in msec.
+"
 " Return time slept in milliseconds.  With the +reltime feature this can be
 " more than the actual waiting time.  Without +reltime it can also be less.
 func WaitFor(expr, ...)
-  let timeout = get(a:000, 0, 1000)
+  let timeout = get(a:000, 0, 5000)
   " using reltime() is more accurate, but not always available
   if has('reltime')
     let start = reltime()
   else
     let slept = 0
   endif
+  if type(a:expr) == v:t_func
+    let Test = a:expr
+  else
+    let Test = {-> eval(a:expr) }
+  endif
   for i in range(timeout / 10)
-    if eval(a:expr)
+    if Test()
       if has('reltime')
 	return float2nr(reltimefloat(reltime(start)) * 1000)
       endif
@@ -156,7 +165,7 @@ func WaitFor(expr, ...)
     endif
     sleep 10m
   endfor
-  return timeout
+  throw 'WaitFor() timed out after ' . timeout . ' msec'
 endfunc
 
 " Wait for up to a given milliseconds.
@@ -187,16 +196,44 @@ func s:feedkeys(timer)
   call feedkeys('x', 'nt')
 endfunc
 
+" Get $VIMPROG to run Vim executable.
+" The Makefile writes it as the first line in the "vimcmd" file.
+" Nvim: uses $NVIM_TEST_ARG0.
+func GetVimProg()
+  if empty($NVIM_TEST_ARG0)
+    " Assume the script was sourced instead of running "make".
+    return v:progpath
+  endif
+  if has('win32')
+    return substitute($NVIM_TEST_ARG0, '/', '\\', 'g')
+  else
+    return $NVIM_TEST_ARG0
+  endif
+endfunc
+
 " Get the command to run Vim, with -u NONE and --headless arguments.
-" Returns an empty string on error.
-func GetVimCommand()
-  let cmd = v:progpath
-  let cmd = substitute(cmd, '-u \f\+', '-u NONE', '')
-  if cmd !~ '-u NONE'
-    let cmd = cmd . ' -u NONE'
+" If there is an argument use it instead of "NONE".
+func GetVimCommand(...)
+  if a:0 == 0
+    let name = 'NONE'
+  else
+    let name = a:1
+  endif
+  let cmd = GetVimProg()
+  let cmd = substitute(cmd, '-u \f\+', '-u ' . name, '')
+  if cmd !~ '-u '. name
+    let cmd = cmd . ' -u ' . name
   endif
   let cmd .= ' --headless -i NONE'
   let cmd = substitute(cmd, 'VIMRUNTIME=.*VIMRUNTIME;', '', '')
+  return cmd
+endfunc
+
+" Get the command to run Vim, with --clean.
+func GetVimCommandClean()
+  let cmd = GetVimCommand()
+  let cmd = substitute(cmd, '-u NONE', '--clean', '')
+  let cmd = substitute(cmd, '--headless', '', '')
   return cmd
 endfunc
 
@@ -245,4 +282,8 @@ func! Screenline(lnum)
   endfor
   let line = join(chars, '')
   return matchstr(line, '^.\{-}\ze\s*$')
+endfunc
+
+func CanRunGui()
+  return has('gui') && ($DISPLAY != "" || has('gui_running'))
 endfunc

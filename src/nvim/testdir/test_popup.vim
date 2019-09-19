@@ -14,7 +14,7 @@ func ListMonths()
   if !empty(entered)
     let mth = filter(mth, 'v:val=~"^".entered')
   endif
-  call complete(1, mth)
+  call complete(1, mth) 
   return ''
 endfunc
 
@@ -72,7 +72,7 @@ func Test_popup_complete()
   call feedkeys("aJu\<f5>\<c-p>l\<c-y>", 'tx')
   call assert_equal(["Jul"], getline(1,2))
   %d
-
+  
   " any-non printable, non-white character: Add this character and
   " reduce number of matches
   call feedkeys("aJu\<f5>\<c-p>l\<c-n>\<c-y>", 'tx')
@@ -94,7 +94,7 @@ func Test_popup_complete()
   call feedkeys("aJ\<f5>".repeat("\<c-n>",3)."\<c-l>\<esc>", 'tx')
   call assert_equal(["J"], getline(1,2))
   %d
-
+  
   " <c-l> - Insert one character from the current match
   call feedkeys("aJ\<f5>".repeat("\<c-n>",4)."\<c-l>\<esc>", 'tx')
   call assert_equal(["January"], getline(1,2))
@@ -272,6 +272,38 @@ func Test_noinsert_complete()
   bwipe!
 
   set completeopt-=noinsert
+  iunmap <F5>
+endfunc
+
+func Test_complete_no_filter()
+  func! s:complTest1() abort
+    call complete(1, [{'word': 'foobar'}])
+    return ''
+  endfunc
+  func! s:complTest2() abort
+    call complete(1, [{'word': 'foobar', 'equal': 1}])
+    return ''
+  endfunc
+
+  let completeopt = &completeopt
+
+  " without equal=1
+  new
+  set completeopt=menuone,noinsert,menu
+  inoremap <F5>  <C-R>=s:complTest1()<CR>
+  call feedkeys("i\<F5>z\<CR>\<CR>\<ESC>.", 'tx')
+  call assert_equal('z', getline(1))
+  bwipe!
+
+  " with equal=1
+  new
+  set completeopt=menuone,noinsert,menu
+  inoremap <F5>  <C-R>=s:complTest2()<CR>
+  call feedkeys("i\<F5>z\<CR>\<CR>\<ESC>.", 'tx')
+  call assert_equal('foobar', getline(1))
+  bwipe!
+
+  let &completeopt = completeopt
   iunmap <F5>
 endfunc
 
@@ -484,6 +516,35 @@ func Test_completion_ctrl_e_without_autowrap()
   q!
 endfunc
 
+func DummyCompleteSix()
+  call complete(1, ['Hello', 'World'])
+  return ''
+endfunction
+
+" complete() correctly clears the list of autocomplete candidates
+" See #1411
+func Test_completion_clear_candidate_list()
+  new
+  %d
+  " select first entry from the completion popup
+  call feedkeys("a    xxx\<C-N>\<C-R>=DummyCompleteSix()\<CR>", "tx")
+  call assert_equal('Hello', getline(1))
+  %d
+  " select second entry from the completion popup
+  call feedkeys("a    xxx\<C-N>\<C-R>=DummyCompleteSix()\<CR>\<C-N>", "tx")
+  call assert_equal('World', getline(1))
+  %d
+  " select original text
+  call feedkeys("a    xxx\<C-N>\<C-R>=DummyCompleteSix()\<CR>\<C-N>\<C-N>", "tx")
+  call assert_equal('    xxx', getline(1))
+  %d
+  " back at first entry from completion list
+  call feedkeys("a    xxx\<C-N>\<C-R>=DummyCompleteSix()\<CR>\<C-N>\<C-N>\<C-N>", "tx")
+  call assert_equal('Hello', getline(1))
+
+  bw!
+endfunc
+
 func Test_completion_respect_bs_option()
   new
   let li = ["aaa", "aaa12345", "aaaabcdef", "aaaABC"]
@@ -541,82 +602,6 @@ func Test_completion_comment_formatting()
   endtry
   call assert_equal(['', '/*', ' *', ' */'], getline(1,4))
   bwipe!
-endfunc
-
-func DummyCompleteSix()
-  call complete(1, ['Hello', 'World'])
-  return ''
-endfunction
-
-" complete() correctly clears the list of autocomplete candidates
-func Test_completion_clear_candidate_list()
-  new
-  %d
-  " select first entry from the completion popup
-  call feedkeys("a    xxx\<C-N>\<C-R>=DummyCompleteSix()\<CR>", "tx")
-  call assert_equal('Hello', getline(1))
-  %d
-  " select second entry from the completion popup
-  call feedkeys("a    xxx\<C-N>\<C-R>=DummyCompleteSix()\<CR>\<C-N>", "tx")
-  call assert_equal('World', getline(1))
-  %d
-  " select original text
-  call feedkeys("a    xxx\<C-N>\<C-R>=DummyCompleteSix()\<CR>\<C-N>\<C-N>", "tx")
-  call assert_equal('    xxx', getline(1))
-  %d
-  " back at first entry from completion list
-  call feedkeys("a    xxx\<C-N>\<C-R>=DummyCompleteSix()\<CR>\<C-N>\<C-N>\<C-N>", "tx")
-  call assert_equal('Hello', getline(1))
-
-  bw!
-endfunc
-
-func Test_popup_complete_backwards()
-  new
-  call setline(1, ['Post', 'Port', 'Po'])
-  let expected=['Post', 'Port', 'Port']
-  call cursor(3,2)
-  call feedkeys("A\<C-X>". repeat("\<C-P>", 3). "rt\<cr>", 'tx')
-  call assert_equal(expected, getline(1,'$'))
-  bwipe!
-endfunc
-
-func Test_popup_and_preview_autocommand()
-  " This used to crash Vim
-  if !has('python')
-    return
-  endif
-  let h = winheight(0)
-  if h < 15
-    return
-  endif
-  new
-  augroup MyBufAdd
-    au!
-    au BufAdd * nested tab sball
-  augroup END
-  set omnifunc=pythoncomplete#Complete
-  call setline(1, 'import os')
-  " make the line long
-  call setline(2, '                                 os.')
-  $
-  call feedkeys("A\<C-X>\<C-O>\<C-N>\<C-N>\<C-N>\<enter>\<esc>", 'tx')
-  call assert_equal("import os", getline(1))
-  call assert_match('                                 os.\(EX_IOERR\|O_CREAT\)$', getline(2))
-  call assert_equal(1, winnr('$'))
-  " previewwindow option is not set
-  call assert_equal(0, &previewwindow)
-  norm! gt
-  call assert_equal(0, &previewwindow)
-  norm! gT
-  call assert_equal(12, tabpagenr('$'))
-  tabonly
-  pclose
-  augroup MyBufAdd
-    au!
-  augroup END
-  augroup! MyBufAdd
-  bw!
 endfunc
 
 func MessCompleteMonths()
@@ -684,29 +669,112 @@ func Test_popup_and_window_resize()
   if h < 15
     return
   endif
-  let g:buf = term_start([$NVIM_PRG, '--clean', '-c', 'set noswapfile'], {'term_rows': h / 3})
-  call term_sendkeys(g:buf, (h / 3 - 1)."o\<esc>G")
-  call term_sendkeys(g:buf, "i\<c-x>")
-  call term_wait(g:buf, 200)
-  call term_sendkeys(g:buf, "\<c-v>")
-  call term_wait(g:buf, 100)
+  let rows = h / 3
+  let buf = term_start([GetVimProg(), '--clean', '-c', 'set noswapfile'], {'term_rows': rows})
+  call term_sendkeys(buf, (h / 3 - 1) . "o\<esc>")
+  " Wait for the nested Vim to exit insert mode, where it will show the ruler.
+  " Need to trigger a redraw.
+  call WaitFor({-> execute("redraw") == "" && term_getline(buf, rows) =~ '\<' . rows . ',.*Bot'})
+
+  call term_sendkeys(buf, "Gi\<c-x>")
+  call term_sendkeys(buf, "\<c-v>")
+  call term_wait(buf, 100)
   " popup first entry "!" must be at the top
-  call WaitFor('term_getline(g:buf, 1) =~ "^!"')
-  call assert_match('^!\s*$', term_getline(g:buf, 1))
+  call WaitFor({-> term_getline(buf, 1) =~ "^!"})
+  call assert_match('^!\s*$', term_getline(buf, 1))
   exe 'resize +' . (h - 1)
-  call term_wait(g:buf, 100)
+  call term_wait(buf, 100)
   redraw!
   " popup shifted down, first line is now empty
-  call WaitFor('term_getline(g:buf, 1) == ""')
-  call assert_equal('', term_getline(g:buf, 1))
+  call WaitFor({-> term_getline(buf, 1) == ""})
+  call assert_equal('', term_getline(buf, 1))
   sleep 100m
   " popup is below cursor line and shows first match "!"
-  call WaitFor('term_getline(g:buf, term_getcursor(g:buf)[0] + 1) =~ "^!"')
-  call assert_match('^!\s*$', term_getline(g:buf, term_getcursor(g:buf)[0] + 1))
+  call WaitFor({-> term_getline(buf, term_getcursor(buf)[0] + 1) =~ "^!"})
+  call assert_match('^!\s*$', term_getline(buf, term_getcursor(buf)[0] + 1))
   " cursor line also shows !
-  call assert_match('^!\s*$', term_getline(g:buf, term_getcursor(g:buf)[0]))
+  call assert_match('^!\s*$', term_getline(buf, term_getcursor(buf)[0]))
   bwipe!
 endfunc
+
+func Test_popup_and_preview_autocommand()
+  " This used to crash Vim
+  if !has('python')
+    return
+  endif
+  let h = winheight(0)
+  if h < 15
+    return
+  endif
+  new
+  augroup MyBufAdd
+    au!
+    au BufAdd * nested tab sball
+  augroup END
+  set omnifunc=pythoncomplete#Complete
+  call setline(1, 'import os')
+  " make the line long
+  call setline(2, '                                 os.')
+  $
+  call feedkeys("A\<C-X>\<C-O>\<C-N>\<C-N>\<C-N>\<enter>\<esc>", 'tx')
+  call assert_equal("import os", getline(1))
+  call assert_match('                                 os.\(EX_IOERR\|O_CREAT\)$', getline(2))
+  call assert_equal(1, winnr('$'))
+  " previewwindow option is not set
+  call assert_equal(0, &previewwindow)
+  norm! gt
+  call assert_equal(0, &previewwindow)
+  norm! gT
+  call assert_equal(10, tabpagenr('$'))
+  tabonly
+  pclose
+  augroup MyBufAdd
+    au!
+  augroup END
+  augroup! MyBufAdd
+  bw!
+endfunc
+
+
+func Test_popup_complete_backwards()
+  new
+  call setline(1, ['Post', 'Port', 'Po'])
+  let expected=['Post', 'Port', 'Port']
+  call cursor(3,2)
+  call feedkeys("A\<C-X>". repeat("\<C-P>", 3). "rt\<cr>", 'tx')
+  call assert_equal(expected, getline(1,'$'))
+  bwipe!
+endfunc
+
+fun! Test_complete_o_tab()
+  throw 'skipped: Nvim does not support test_override()'
+  let s:o_char_pressed = 0
+
+  fun! s:act_on_text_changed()
+    if s:o_char_pressed
+      let s:o_char_pressed = 0
+      call feedkeys("\<c-x>\<c-n>", 'i')
+    endif
+  endf
+
+  set completeopt=menu,noselect
+  new
+  imap <expr> <buffer> <tab> pumvisible() ? "\<c-p>" : "X"
+  autocmd! InsertCharPre <buffer> let s:o_char_pressed = (v:char ==# 'o')
+  autocmd! TextChangedI <buffer> call <sid>act_on_text_changed()
+  call setline(1,  ['hoard', 'hoax', 'hoarse', ''])
+  let l:expected = ['hoard', 'hoax', 'hoarse', 'hoax', 'hoax']
+  call cursor(4,1)
+  call test_override("char_avail", 1)
+  call feedkeys("Ahoa\<tab>\<tab>\<c-y>\<esc>", 'tx')
+  call feedkeys("oho\<tab>\<tab>\<c-y>\<esc>", 'tx')
+  call assert_equal(l:expected, getline(1,'$'))
+
+  call test_override("char_avail", 0)
+  bwipe!
+  set completeopt&
+  delfunc s:act_on_text_changed
+endf
 
 func Test_popup_complete_info_01()
   new
@@ -807,6 +875,40 @@ func Test_popup_complete_info_02()
   call feedkeys("i\<C-X>\<C-U>\<F5>", 'tx')
   call assert_equal(d, g:compl_info)
   bwipe!
+endfunc
+
+func Test_CompleteChanged()
+  new
+  call setline(1, ['foo', 'bar', 'foobar', ''])
+  set complete=. completeopt=noinsert,noselect,menuone
+  function! OnPumChange()
+    let g:event = copy(v:event)
+    let g:item = get(v:event, 'completed_item', {})
+    let g:word = get(g:item, 'word', v:null)
+  endfunction
+  augroup AAAAA_Group
+    au!
+    autocmd CompleteChanged * :call OnPumChange()
+  augroup END
+  call cursor(4, 1)
+
+  call feedkeys("Sf\<C-N>", 'tx')
+  call assert_equal({'completed_item': {}, 'width': 15,
+        \ 'height': 2, 'size': 2,
+        \ 'col': 0, 'row': 4, 'scrollbar': v:false}, g:event)
+  call feedkeys("a\<C-N>\<C-N>\<C-E>", 'tx')
+  call assert_equal('foo', g:word)
+  call feedkeys("a\<C-N>\<C-N>\<C-N>\<C-E>", 'tx')
+  call assert_equal('foobar', g:word)
+  call feedkeys("a\<C-N>\<C-N>\<C-N>\<C-N>\<C-E>", 'tx')
+  call assert_equal(v:null, g:word)
+  call feedkeys("a\<C-N>\<C-N>\<C-N>\<C-N>\<C-P>", 'tx')
+  call assert_equal('foobar', g:word)
+
+  autocmd! AAAAA_Group
+  set complete& completeopt&
+  delfunc! OnPumchange
+  bw!
 endfunc
 
 " vim: shiftwidth=2 sts=2 expandtab

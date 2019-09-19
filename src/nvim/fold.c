@@ -13,6 +13,7 @@
 #include "nvim/vim.h"
 #include "nvim/ascii.h"
 #include "nvim/fold.h"
+#include "nvim/change.h"
 #include "nvim/charset.h"
 #include "nvim/cursor.h"
 #include "nvim/diff.h"
@@ -737,15 +738,13 @@ void deleteFold(
     changed_lines(first_lnum, (colnr_T)0, last_lnum, 0L, false);
 
     // send one nvim_buf_lines_event at the end
-    if (kv_size(curbuf->update_channels)) {
-      // last_lnum is the line *after* the last line of the outermost fold
-      // that was modified. Note also that deleting a fold might only require
-      // the modification of the *first* line of the fold, but we send through a
-      // notification that includes every line that was part of the fold
-      int64_t num_changed = last_lnum - first_lnum;
-      buf_updates_send_changes(curbuf, first_lnum, num_changed,
-                               num_changed, true);
-    }
+    // last_lnum is the line *after* the last line of the outermost fold
+    // that was modified. Note also that deleting a fold might only require
+    // the modification of the *first* line of the fold, but we send through a
+    // notification that includes every line that was part of the fold
+    int64_t num_changed = last_lnum - first_lnum;
+    buf_updates_send_changes(curbuf, first_lnum, num_changed,
+                             num_changed, true);
   }
 }
 
@@ -1584,13 +1583,11 @@ static void foldCreateMarkers(linenr_T start, linenr_T end)
    * changed when the start marker is inserted and the end isn't. */
   changed_lines(start, (colnr_T)0, end, 0L, false);
 
-  if (kv_size(curbuf->update_channels)) {
-    // Note: foldAddMarker() may not actually change start and/or end if
-    // u_save() is unable to save the buffer line, but we send the
-    // nvim_buf_lines_event anyway since it won't do any harm.
-    int64_t num_changed = 1 + end - start;
-    buf_updates_send_changes(curbuf, start, num_changed, num_changed, true);
-  }
+  // Note: foldAddMarker() may not actually change start and/or end if
+  // u_save() is unable to save the buffer line, but we send the
+  // nvim_buf_lines_event anyway since it won't do any harm.
+  int64_t num_changed = 1 + end - start;
+  buf_updates_send_changes(curbuf, start, num_changed, num_changed, true);
 }
 
 /* foldAddMarker() {{{2 */
@@ -1648,19 +1645,22 @@ deleteFoldMarkers(
                 foldendmarkerlen);
 }
 
-/* foldDelMarker() {{{2 */
-/*
- * Delete marker "marker[markerlen]" at the end of line "lnum".
- * Delete 'commentstring' if it matches.
- * If the marker is not found, there is no error message.  Could a missing
- * close-marker.
- */
+// foldDelMarker() {{{2
+//
+// Delete marker "marker[markerlen]" at the end of line "lnum".
+// Delete 'commentstring' if it matches.
+// If the marker is not found, there is no error message.  Could be a missing
+// close-marker.
 static void foldDelMarker(linenr_T lnum, char_u *marker, size_t markerlen)
 {
   char_u      *newline;
   char_u      *cms = curbuf->b_p_cms;
   char_u      *cms2;
 
+  // end marker may be missing and fold extends below the last line
+  if (lnum > curbuf->b_ml.ml_line_count) {
+    return;
+  }
   char_u *line = ml_get(lnum);
   for (char_u *p = line; *p != NUL; ++p) {
     if (STRNCMP(p, marker, markerlen) != 0) {
@@ -2429,15 +2429,18 @@ static linenr_T foldUpdateIEMSRecurse(
    * lvl >= level: fold continues below "bot"
    */
 
-  /* Current fold at least extends until lnum. */
+  // Current fold at least extends until lnum.
   if (fp->fd_len < flp->lnum - fp->fd_top) {
     fp->fd_len = flp->lnum - fp->fd_top;
     fp->fd_small = kNone;
     fold_changed = true;
+  } else if (fp->fd_top + fp->fd_len > linecount) {
+    // running into the end of the buffer (deleted last line)
+    fp->fd_len = linecount - fp->fd_top + 1;
   }
 
-  /* Delete contained folds from the end of the last one found until where
-   * we stopped looking. */
+  // Delete contained folds from the end of the last one found until where
+  // we stopped looking.
   foldRemove(&fp->fd_nested, startlnum2 - fp->fd_top,
       flp->lnum - 1 - fp->fd_top);
 

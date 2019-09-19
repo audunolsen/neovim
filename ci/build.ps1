@@ -1,30 +1,38 @@
 $ErrorActionPreference = 'stop'
 Set-PSDebug -Strict -Trace 1
 
+$isPullRequest = ($env:APPVEYOR_PULL_REQUEST_HEAD_COMMIT -ne $null)
 $env:CONFIGURATION -match '^(?<compiler>\w+)_(?<bits>32|64)(?:-(?<option>\w+))?$'
 $compiler = $Matches.compiler
 $compileOption = $Matches.option
 $bits = $Matches.bits
-$cmakeBuildType = 'RelWithDebInfo'
+$cmakeBuildType = $(if ($env:CMAKE_BUILD_TYPE -ne $null) {$env:CMAKE_BUILD_TYPE} else {'RelWithDebInfo'});
+$buildDir = [System.IO.Path]::GetFullPath("$(pwd)")
 $depsCmakeVars = @{
   CMAKE_BUILD_TYPE = $cmakeBuildType;
 }
 $nvimCmakeVars = @{
   CMAKE_BUILD_TYPE = $cmakeBuildType;
   BUSTED_OUTPUT_TYPE = 'nvim';
+  DEPS_PREFIX=$(if ($env:DEPS_PREFIX -ne $null) {$env:DEPS_PREFIX} else {".deps/usr"});
+}
+if ($env:DEPS_BUILD_DIR -eq $null) {
+  $env:DEPS_BUILD_DIR = ".deps";
 }
 $uploadToCodeCov = $false
-
-# For pull requests, skip some build configurations to save time.
-if ($env:APPVEYOR_PULL_REQUEST_HEAD_COMMIT -and $env:CONFIGURATION -match '^(MSVC_64|MINGW_32|MINGW_64-gcov)$') {
-  exit 0
-}
 
 function exitIfFailed() {
   if ($LastExitCode -ne 0) {
     Set-PSDebug -Off
     exit $LastExitCode
   }
+}
+
+if (-Not (Test-Path -PathType container $env:DEPS_BUILD_DIR)) {
+  write-host "cache dir not found: $($env:DEPS_BUILD_DIR)"
+  mkdir $env:DEPS_BUILD_DIR
+} else {
+  write-host "cache dir $($env:DEPS_BUILD_DIR) size: $(Get-ChildItem $env:DEPS_BUILD_DIR -recurse | Measure-Object -property length -sum | Select -expand sum)"
 }
 
 if ($compiler -eq 'MINGW') {
@@ -37,13 +45,14 @@ if ($compiler -eq 'MINGW') {
   if ($compileOption -eq 'gcov') {
     $nvimCmakeVars['USE_GCOV'] = 'ON'
     $uploadToCodecov = $true
+    $env:GCOV = "C:\msys64\mingw$bits\bin\gcov"
   }
   # These are native MinGW builds, but they use the toolchain inside
   # MSYS2, this allows using all the dependencies and tools available
   # in MSYS2, but we cannot build inside the MSYS2 shell.
   $cmakeGenerator = 'Ninja'
   $cmakeGeneratorArgs = '-v'
-  $mingwPackages = @('ninja', 'cmake', 'perl', 'diffutils', 'unibilium').ForEach({
+  $mingwPackages = @('ninja', 'cmake', 'perl', 'diffutils').ForEach({
     "mingw-w64-$arch-$_"
   })
 
@@ -89,20 +98,20 @@ function convertToCmakeArgs($vars) {
   return $vars.GetEnumerator() | foreach { "-D$($_.Key)=$($_.Value)" }
 }
 
-if (-Not (Test-Path -PathType container .deps)) {
-  mkdir .deps
-}
-cd .deps
-cmake -G $cmakeGenerator $(convertToCmakeArgs($depsCmakeVars)) ..\third-party\ ; exitIfFailed
+cd $env:DEPS_BUILD_DIR
+cmake -G $cmakeGenerator $(convertToCmakeArgs($depsCmakeVars)) "$buildDir/third-party/" ; exitIfFailed
 cmake --build . --config $cmakeBuildType -- $cmakeGeneratorArgs ; exitIfFailed
-cd ..
+cd $buildDir
 
 # Build Neovim
 mkdir build
 cd build
 cmake -G $cmakeGenerator $(convertToCmakeArgs($nvimCmakeVars)) .. ; exitIfFailed
 cmake --build . --config $cmakeBuildType -- $cmakeGeneratorArgs ; exitIfFailed
-bin\nvim --version ; exitIfFailed
+.\bin\nvim --version ; exitIfFailed
+
+# Ensure that the "win32" feature is set.
+.\bin\nvim -u NONE --headless -c 'exe !has(\"win32\").\"cq\"' ; exitIfFailed
 
 # Functional tests
 # The $LastExitCode from MSBuild can't be trusted
@@ -113,21 +122,28 @@ cmake --build . --config $cmakeBuildType --target functionaltest -- $cmakeGenera
   foreach { $failed = $failed -or
     $_ -match 'functional tests failed with error'; $_ }
 if ($failed) {
+  if ($uploadToCodecov) {
+    bash -l /c/projects/neovim/ci/common/submit_coverage.sh functionaltest
+  }
   exit $LastExitCode
 }
 Set-PSDebug -Strict -Trace 1
 
 
 if ($uploadToCodecov) {
-  C:\msys64\usr\bin\bash -lc "cd /c/projects/neovim; bash <(curl -s https://codecov.io/bash) -c -F functionaltest || echo 'codecov upload failed.'"
+  bash -l /c/projects/neovim/ci/common/submit_coverage.sh functionaltest
 }
 
 # Old tests
+# Add MSYS to path, required for e.g. `find` used in test scripts.
+# But would break functionaltests, where its `more` would be used then.
+$OldPath = $env:PATH
 $env:PATH = "C:\msys64\usr\bin;$env:PATH"
-& "C:\msys64\mingw$bits\bin\mingw32-make.exe" -C $(Convert-Path ..\src\nvim\testdir) VERBOSE=1
+& "C:\msys64\mingw$bits\bin\mingw32-make.exe" -C $(Convert-Path ..\src\nvim\testdir) VERBOSE=1 ; exitIfFailed
+$env:PATH = $OldPath
 
 if ($uploadToCodecov) {
-  C:\msys64\usr\bin\bash -lc "cd /c/projects/neovim; bash <(curl -s https://codecov.io/bash) -c -F oldtest || echo 'codecov upload failed.'"
+  bash -l /c/projects/neovim/ci/common/submit_coverage.sh oldtest
 }
 
 # Build artifacts

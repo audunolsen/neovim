@@ -35,7 +35,9 @@
 #include "nvim/screen.h"
 #include "nvim/strings.h"
 #include "nvim/syntax.h"
+#include "nvim/highlight.h"
 #include "nvim/ui.h"
+#include "nvim/ui_compositor.h"
 #include "nvim/mouse.h"
 #include "nvim/os/os.h"
 #include "nvim/os/input.h"
@@ -116,12 +118,88 @@ static const char *msg_ext_kind = NULL;
 static Array msg_ext_chunks = ARRAY_DICT_INIT;
 static garray_T msg_ext_last_chunk = GA_INIT(sizeof(char), 40);
 static sattr_T msg_ext_last_attr = -1;
+static size_t msg_ext_cur_len = 0;
 
 static bool msg_ext_overwrite = false;  ///< will overwrite last message
 static int msg_ext_visible = 0;  ///< number of messages currently visible
 
 /// Shouldn't clear message after leaving cmdline
 static bool msg_ext_keep_after_cmdline = false;
+
+static int msg_grid_pos_at_flush = 0;
+static int msg_grid_scroll_discount = 0;
+
+static void ui_ext_msg_set_pos(int row, bool scrolled)
+{
+  char buf[MAX_MCO];
+  size_t size = utf_char2bytes(curwin->w_p_fcs_chars.msgsep, (char_u *)buf);
+  buf[size] = '\0';
+  ui_call_msg_set_pos(msg_grid.handle, row, scrolled,
+                      (String){ .data = buf, .size = size });
+}
+
+void msg_grid_set_pos(int row, bool scrolled)
+{
+  if (!msg_grid.throttled) {
+    ui_ext_msg_set_pos(row, scrolled);
+    msg_grid_pos_at_flush = row;
+  }
+  msg_grid_pos = row;
+  if (msg_grid.chars) {
+    msg_grid_adj.row_offset = -row;
+  }
+}
+
+bool msg_use_grid(void)
+{
+  return default_grid.chars && msg_use_msgsep()
+         && !ui_has(kUIMessages);
+}
+
+void msg_grid_validate(void)
+{
+  grid_assign_handle(&msg_grid);
+  bool should_alloc = msg_use_grid();
+  if (should_alloc && (msg_grid.Rows != Rows || msg_grid.Columns != Columns
+                       || !msg_grid.chars)) {
+    // TODO(bfredl): eventually should be set to "invalid". I e all callers
+    // will use the grid including clear to EOS if necessary.
+    grid_alloc(&msg_grid, Rows, Columns, false, true);
+
+    xfree(msg_grid.dirty_col);
+    msg_grid.dirty_col = xcalloc(Rows, sizeof(*msg_grid.dirty_col));
+
+    // Tricky: allow resize while pager is active
+    int pos = msg_scrolled ? msg_grid_pos : Rows - p_ch;
+    ui_comp_put_grid(&msg_grid, pos, 0, msg_grid.Rows, msg_grid.Columns,
+                     false, true);
+    ui_call_grid_resize(msg_grid.handle, msg_grid.Columns, msg_grid.Rows);
+
+    msg_grid.throttled = false;  // don't throttle in 'cmdheight' area
+    msg_scrolled_at_flush = msg_scrolled;
+    msg_grid.focusable = false;
+    if (!msg_scrolled) {
+      msg_grid_set_pos(Rows - p_ch, false);
+    }
+  } else if (!should_alloc && msg_grid.chars) {
+    ui_comp_remove_grid(&msg_grid);
+    grid_free(&msg_grid);
+    XFREE_CLEAR(msg_grid.dirty_col);
+    ui_call_grid_destroy(msg_grid.handle);
+    msg_grid.throttled = false;
+    msg_grid_adj.row_offset = 0;
+    redraw_cmdline = true;
+  } else if (msg_grid.chars && !msg_scrolled && msg_grid_pos != Rows - p_ch) {
+    msg_grid_set_pos(Rows - p_ch, false);
+  }
+
+  if (msg_grid.chars && cmdline_row < msg_grid_pos) {
+    // TODO(bfredl): this should already be the case, but fails in some
+    // "batched" executions where compute_cmdrow() use stale positions or
+    // something.
+    cmdline_row = msg_grid_pos;
+  }
+}
 
 /*
  * msg(s) - displays the string 's' on the status line
@@ -133,15 +211,11 @@ int msg(char_u *s)
   return msg_attr_keep(s, 0, false, false);
 }
 
-/*
- * Like msg() but keep it silent when 'verbosefile' is set.
- */
-int verb_msg(char_u *s)
+/// Like msg() but keep it silent when 'verbosefile' is set.
+int verb_msg(char *s)
 {
-  int n;
-
   verbose_enter();
-  n = msg_attr_keep(s, 0, false, false);
+  int n = msg_attr_keep((char_u *)s, 0, false, false);
   verbose_leave();
 
   return n;
@@ -154,12 +228,12 @@ int msg_attr(const char *s, const int attr)
 }
 
 /// similar to msg_outtrans_attr, but support newlines and tabs.
-void msg_multiline_attr(const char *s, int attr)
+void msg_multiline_attr(const char *s, int attr, bool check_int)
   FUNC_ATTR_NONNULL_ALL
 {
   const char *next_spec = s;
 
-  while (next_spec != NULL) {
+  while (next_spec != NULL && (!check_int || !got_int)) {
     next_spec = strpbrk(s, "\t\n\r");
 
     if (next_spec != NULL) {
@@ -238,7 +312,7 @@ bool msg_attr_keep(char_u *s, int attr, bool keep, bool multiline)
     s = buf;
 
   if (multiline) {
-    msg_multiline_attr((char *)s, attr);
+    msg_multiline_attr((char *)s, attr, false);
   } else {
     msg_outtrans_attr(s, attr);
   }
@@ -384,7 +458,7 @@ int smsg(char *s, ...)
   va_list arglist;
 
   va_start(arglist, s);
-  vim_vsnprintf((char *)IObuff, IOSIZE, s, arglist, NULL);
+  vim_vsnprintf((char *)IObuff, IOSIZE, s, arglist);
   va_end(arglist);
   return msg(IObuff);
 }
@@ -395,9 +469,20 @@ int smsg_attr(int attr, char *s, ...)
   va_list arglist;
 
   va_start(arglist, s);
-  vim_vsnprintf((char *)IObuff, IOSIZE, s, arglist, NULL);
+  vim_vsnprintf((char *)IObuff, IOSIZE, s, arglist);
   va_end(arglist);
   return msg_attr((const char *)IObuff, attr);
+}
+
+int smsg_attr_keep(int attr, char *s, ...)
+  FUNC_ATTR_PRINTF(2, 3)
+{
+  va_list arglist;
+
+  va_start(arglist, s);
+  vim_vsnprintf((char *)IObuff, IOSIZE, s, arglist);
+  va_end(arglist);
+  return msg_attr_keep(IObuff, attr, true, false);
 }
 
 /*
@@ -413,8 +498,7 @@ static char_u   *last_sourcing_name = NULL;
  */
 void reset_last_sourcing(void)
 {
-  xfree(last_sourcing_name);
-  last_sourcing_name = NULL;
+  XFREE_CLEAR(last_sourcing_name);
   last_sourcing_lnum = 0;
 }
 
@@ -575,7 +659,23 @@ static bool emsg_multiline(const char *s, bool multiline)
         }
         redir_write(s, strlen(s));
       }
+
+      // Log (silent) errors as debug messages.
+      if (sourcing_name != NULL && sourcing_lnum != 0) {
+        DLOG("(:silent) %s (%s (line %ld))",
+             s, sourcing_name, (long)sourcing_lnum);
+      } else {
+        DLOG("(:silent) %s", s);
+      }
+
       return true;
+    }
+
+    // Log editor errors as INFO.
+    if (sourcing_name != NULL && sourcing_lnum != 0) {
+      ILOG("%s (%s (line %ld))", s, sourcing_name, (long)sourcing_lnum);
+    } else {
+      ILOG("%s", s);
     }
 
     ex_exitval = 1;
@@ -662,7 +762,7 @@ bool emsgf_multiline(const char *const fmt, ...)
   }
 
   va_start(ap, fmt);
-  vim_vsnprintf(errbuf, sizeof(errbuf), fmt, ap, NULL);
+  vim_vsnprintf(errbuf, sizeof(errbuf), fmt, ap);
   va_end(ap);
 
   ret = emsg_multiline(errbuf, true);
@@ -678,7 +778,7 @@ static bool emsgfv(const char *fmt, va_list ap)
     return true;
   }
 
-  vim_vsnprintf(errbuf, sizeof(errbuf), fmt, ap, NULL);
+  vim_vsnprintf(errbuf, sizeof(errbuf), fmt, ap);
 
   return emsg((const char_u *)errbuf);
 }
@@ -726,11 +826,11 @@ void msg_schedule_emsgf(const char *const fmt, ...)
 {
   va_list ap;
   va_start(ap, fmt);
-  vim_vsnprintf((char *)IObuff, IOSIZE, fmt, ap, NULL);
+  vim_vsnprintf((char *)IObuff, IOSIZE, fmt, ap);
   va_end(ap);
 
   char *s = xstrdup((char *)IObuff);
-  loop_schedule(&main_loop, event_create(msg_emsgf_event, 1, s));
+  multiqueue_put(main_loop.events, msg_emsgf_event, 1, s);
 }
 
 /*
@@ -920,8 +1020,9 @@ void ex_messages(void *const eap_p)
  */
 void msg_end_prompt(void)
 {
-  need_wait_return = FALSE;
-  emsg_on_display = FALSE;
+  msg_ext_clear_later();
+  need_wait_return = false;
+  emsg_on_display = false;
   cmdline_row = msg_row;
   msg_col = 0;
   msg_clr_eos();
@@ -939,7 +1040,6 @@ void wait_return(int redraw)
   int oldState;
   int tmpState;
   int had_got_int;
-  int save_Recording;
   FILE        *save_scriptout;
 
   if (redraw == true) {
@@ -1005,16 +1105,16 @@ void wait_return(int redraw)
       // Temporarily disable Recording. If Recording is active, the
       // character will be recorded later, since it will be added to the
       // typebuf after the loop
-      save_Recording = Recording;
+      const int save_reg_recording = reg_recording;
       save_scriptout = scriptout;
-      Recording = FALSE;
+      reg_recording = 0;
       scriptout = NULL;
       c = safe_vgetc();
       if (had_got_int && !global_busy) {
         got_int = false;
       }
       no_mapping--;
-      Recording = save_Recording;
+      reg_recording = save_reg_recording;
       scriptout = save_scriptout;
 
 
@@ -1076,16 +1176,14 @@ void wait_return(int redraw)
       /* Put the character back in the typeahead buffer.  Don't use the
        * stuff buffer, because lmaps wouldn't work. */
       ins_char_typebuf(c);
-      do_redraw = TRUE;             /* need a redraw even though there is
-                                       typeahead */
+      do_redraw = true;             // need a redraw even though there is
+                                    // typeahead
     }
   }
-  redir_off = FALSE;
+  redir_off = false;
 
-  /*
-   * If the user hits ':', '?' or '/' we get a command line from the next
-   * line.
-   */
+  // If the user hits ':', '?' or '/' we get a command line from the next
+  // line.
   if (c == ':' || c == '?' || c == '/') {
     if (!exmode_active)
       cmdline_row = msg_row;
@@ -1094,24 +1192,21 @@ void wait_return(int redraw)
     msg_ext_keep_after_cmdline = true;
   }
 
-  /*
-   * If the window size changed set_shellsize() will redraw the screen.
-   * Otherwise the screen is only redrawn if 'redraw' is set and no ':'
-   * typed.
-   */
+  // If the window size changed set_shellsize() will redraw the screen.
+  // Otherwise the screen is only redrawn if 'redraw' is set and no ':'
+  // typed.
   tmpState = State;
-  State = oldState;                 /* restore State before set_shellsize */
+  State = oldState;                 // restore State before set_shellsize
   setmouse();
   msg_check();
-  need_wait_return = FALSE;
-  did_wait_return = TRUE;
-  emsg_on_display = FALSE;      /* can delete error message now */
-  lines_left = -1;              /* reset lines_left at next msg_start() */
+  need_wait_return = false;
+  did_wait_return = true;
+  emsg_on_display = false;      // can delete error message now
+  lines_left = -1;              // reset lines_left at next msg_start()
   reset_last_sourcing();
   if (keep_msg != NULL && vim_strsize(keep_msg) >=
       (Rows - cmdline_row - 1) * Columns + sc_col) {
-    xfree(keep_msg);
-    keep_msg = NULL;                /* don't redisplay message, it's too long */
+    XFREE_CLEAR(keep_msg);          // don't redisplay message, it's too long
   }
 
   if (tmpState == SETWSIZE) {       /* got resize event while in vgetc() */
@@ -1178,26 +1273,25 @@ void msg_ext_set_kind(const char *msg_kind)
  */
 void msg_start(void)
 {
-  int did_return = FALSE;
+  int did_return = false;
 
   if (!msg_silent) {
-    xfree(keep_msg);
-    keep_msg = NULL;                    /* don't display old message now */
+    XFREE_CLEAR(keep_msg);              // don't display old message now
   }
 
   if (need_clr_eos) {
-    /* Halfway an ":echo" command and getting an (error) message: clear
-     * any text from the command. */
-    need_clr_eos = FALSE;
+    // Halfway an ":echo" command and getting an (error) message: clear
+    // any text from the command.
+    need_clr_eos = false;
     msg_clr_eos();
   }
 
-  if (!msg_scroll && full_screen) {     /* overwrite last message */
+  if (!msg_scroll && full_screen) {     // overwrite last message
     msg_row = cmdline_row;
     msg_col =
       cmdmsg_rl ? Columns - 1 :
       0;
-  } else if (msg_didout) {                /* start message on next line */
+  } else if (msg_didout) {                // start message on next line
     msg_putchar('\n');
     did_return = TRUE;
     if (exmode_active != EXMODE_NORMAL)
@@ -1206,7 +1300,7 @@ void msg_start(void)
   if (!msg_didany || lines_left < 0)
     msg_starthere();
   if (msg_silent == 0) {
-    msg_didout = FALSE;                     /* no output on current line yet */
+    msg_didout = false;                     // no output on current line yet
   }
 
   if (ui_has(kUIMessages)) {
@@ -1684,6 +1778,7 @@ void msg_prt_line(char_u *s, int list)
 static char_u *screen_puts_mbyte(char_u *s, int l, int attr)
 {
   int cw;
+  attr = hl_combine_attr(HL_ATTR(HLF_MSG), attr);
 
   msg_didout = true;            // remember that line is not empty
   cw = utf_ptr2cells(s);
@@ -1694,7 +1789,7 @@ static char_u *screen_puts_mbyte(char_u *s, int l, int attr)
     return s;
   }
 
-  grid_puts_len(&default_grid, s, l, msg_row, msg_col, attr);
+  grid_puts_len(&msg_grid_adj, s, l, msg_row, msg_col, attr);
   if (cmdmsg_rl) {
     msg_col -= cw;
     if (msg_col == 0) {
@@ -1806,8 +1901,13 @@ void msg_puts_attr_len(const char *const str, const ptrdiff_t len, int attr)
   // different, e.g. for Win32 console) or we just don't know where the
   // cursor is.
   if (msg_use_printf()) {
+    int saved_msg_col = msg_col;
     msg_puts_printf(str, len);
-  } else {
+    if (headless_mode) {
+      msg_col = saved_msg_col;
+    }
+  }
+  if (!msg_use_printf() || (headless_mode && default_grid.chars)) {
     msg_puts_display((const char_u *)str, len, attr, false);
   }
 }
@@ -1826,7 +1926,7 @@ void msg_printf_attr(const int attr, const char *const fmt, ...)
 
   va_list ap;
   va_start(ap, fmt);
-  const size_t len = vim_vsnprintf(msgbuf, sizeof(msgbuf), fmt, ap, NULL);
+  const size_t len = vim_vsnprintf(msgbuf, sizeof(msgbuf), fmt, ap);
   va_end(ap);
 
   msg_scroll = true;
@@ -1872,10 +1972,15 @@ static void msg_puts_display(const char_u *str, int maxlen, int attr,
       msg_ext_last_attr = attr;
     }
     // Concat pieces with the same highlight
-    ga_concat_len(&msg_ext_last_chunk, (char *)str,
-                  strnlen((char *)str, maxlen));
+    size_t len = strnlen((char *)str, maxlen);             // -V781
+    ga_concat_len(&msg_ext_last_chunk, (char *)str, len);
+    msg_ext_cur_len += len;
     return;
   }
+
+  msg_grid_validate();
+
+  cmdline_was_last_drawn = redrawing_cmdline;
 
   while ((maxlen < 0 || (int)(s - str) < maxlen) && *s != NUL) {
     // We are at the end of the screen line when:
@@ -1904,15 +2009,16 @@ static void msg_puts_display(const char_u *str, int maxlen, int attr,
       if (msg_no_more && lines_left == 0)
         break;
 
-      /* Scroll the screen up one line. */
-      msg_scroll_up();
+      // Scroll the screen up one line.
+      bool has_last_char = (*s >= ' ' && !cmdmsg_rl);
+      msg_scroll_up(!has_last_char);
 
       msg_row = Rows - 2;
       if (msg_col >= Columns)           /* can happen after screen resize */
         msg_col = Columns - 1;
 
       // Display char in last column before showing more-prompt.
-      if (*s >= ' ' && !cmdmsg_rl) {
+      if (has_last_char) {
         if (maxlen >= 0) {
           // Avoid including composing chars after the end.
           l = utfc_ptr2len_len(s, (int)((str + maxlen) - s));
@@ -1923,6 +2029,15 @@ static void msg_puts_display(const char_u *str, int maxlen, int attr,
         did_last_char = true;
       } else {
         did_last_char = false;
+      }
+
+      // Tricky: if last cell will be written, delay the throttle until
+      // after the first scroll. Otherwise we would need to keep track of it.
+      if (has_last_char && msg_do_throttle()) {
+        if (!msg_grid.throttled) {
+          msg_grid_scroll_discount++;
+        }
+        msg_grid.throttled = true;
       }
 
       if (p_more) {
@@ -2049,29 +2164,117 @@ int msg_scrollsize(void)
   return msg_scrolled + p_ch + 1;
 }
 
-/*
- * Scroll the screen up one line for displaying the next message line.
- */
-static void msg_scroll_up(void)
+bool msg_use_msgsep(void)
 {
-  if (!msg_did_scroll) {
-    ui_call_win_scroll_over_start();
-    msg_did_scroll = true;
+  // the full-screen scroll behavior doesn't really make sense with
+  // 'ext_multigrid'
+  return ((dy_flags & DY_MSGSEP) || ui_has(kUIMultigrid));
+}
+
+bool msg_do_throttle(void)
+{
+  return msg_use_grid() && !(rdb_flags & RDB_NOTHROTTLE);
+}
+
+/// Scroll the screen up one line for displaying the next message line.
+void msg_scroll_up(bool may_throttle)
+{
+  if (may_throttle && msg_do_throttle()) {
+    msg_grid.throttled = true;
   }
-  if (dy_flags & DY_MSGSEP) {
-    if (msg_scrolled == 0) {
-      grid_fill(&default_grid, Rows-p_ch-1, Rows-p_ch, 0, (int)Columns,
-                curwin->w_p_fcs_chars.msgsep, curwin->w_p_fcs_chars.msgsep,
-                HL_ATTR(HLF_MSGSEP));
+  msg_did_scroll = true;
+  if (msg_use_msgsep()) {
+    if (msg_grid_pos > 0) {
+      msg_grid_set_pos(msg_grid_pos-1, true);
+    } else {
+      grid_del_lines(&msg_grid, 0, 1, msg_grid.Rows, 0, msg_grid.Columns);
+      memmove(msg_grid.dirty_col, msg_grid.dirty_col+1,
+              (msg_grid.Rows-1) * sizeof(*msg_grid.dirty_col));
+      msg_grid.dirty_col[msg_grid.Rows-1] = 0;
     }
-    int nscroll = MIN(msg_scrollsize()+1, Rows);
-    grid_del_lines(&default_grid, Rows-nscroll, 1, Rows, 0, Columns);
   } else {
-    grid_del_lines(&default_grid, 0, 1, (int)Rows, 0, Columns);
+    grid_del_lines(&msg_grid_adj, 0, 1, Rows, 0, Columns);
   }
-  // TODO(bfredl): when msgsep display is properly batched, this fill should be
-  // eliminated.
-  grid_fill(&default_grid, Rows-1, Rows, 0, (int)Columns, ' ', ' ', 0);
+
+  grid_fill(&msg_grid_adj, Rows-1, Rows, 0, Columns, ' ', ' ',
+            HL_ATTR(HLF_MSG));
+}
+
+/// Send throttled message output to UI clients
+///
+/// The way message.c uses the grid_xx family of functions is quite inefficient
+/// relative to the "gridline" UI protocol used by TUI and modern clients.
+/// For instance scrolling is done one line at a time. By throttling drawing
+/// on the message grid, we can coalesce scrolling to a single grid_scroll
+/// per screen update.
+///
+/// NB: The bookkeeping is quite messy, and rests on a bunch of poorly
+/// documented assumtions. For instance that the message area always grows while
+/// being throttled, messages are only being output on the last line etc.
+///
+/// Probably message scrollback storage should reimplented as a file_buffer, and
+/// message scrolling in TUI be reimplemented as a modal floating window. Then
+/// we get throttling "for free" using standard redraw_win_later code paths.
+void msg_scroll_flush(void)
+{
+  if (msg_grid.throttled) {
+    msg_grid.throttled = false;
+    int pos_delta = msg_grid_pos_at_flush - msg_grid_pos;
+    assert(pos_delta >= 0);
+    int delta = MIN(msg_scrolled - msg_scrolled_at_flush, msg_grid.Rows);
+
+    if (pos_delta > 0) {
+      ui_ext_msg_set_pos(msg_grid_pos, true);
+    }
+
+    int to_scroll = delta-pos_delta-msg_grid_scroll_discount;
+    assert(to_scroll >= 0);
+
+    // TODO(bfredl): msg_grid_pos should be 0 already when starting scrolling
+    // but this sometimes fails in "headless" message printing.
+    if (to_scroll > 0 && msg_grid_pos == 0) {
+      ui_call_grid_scroll(msg_grid.handle, 0, Rows, 0, Columns, to_scroll, 0);
+    }
+
+    for (int i = MAX(Rows-MAX(delta, 1), 0); i < Rows; i++) {
+      int row = i-msg_grid_pos;
+      assert(row >= 0);
+      ui_line(&msg_grid, row, 0, msg_grid.dirty_col[row], msg_grid.Columns,
+              HL_ATTR(HLF_MSG), false);
+      msg_grid.dirty_col[row] = 0;
+    }
+  }
+  msg_scrolled_at_flush = msg_scrolled;
+  msg_grid_scroll_discount = 0;
+  msg_grid_pos_at_flush = msg_grid_pos;
+}
+
+void msg_reset_scroll(void)
+{
+  if (ui_has(kUIMessages)) {
+    msg_ext_clear(true);
+    return;
+  }
+  // TODO(bfredl): some duplicate logic with update_screen(). Later on
+  // we should properly disentangle message clear with full screen redraw.
+  if (msg_use_grid()) {
+    msg_grid.throttled = false;
+    // TODO(bfredl): risk for extra flicker i e with
+    // "nvim -o has_swap also_has_swap"
+    msg_grid_set_pos(Rows - p_ch, false);
+    clear_cmdline = true;
+    if (msg_grid.chars) {
+      // non-displayed part of msg_grid is considered invalid.
+      for (int i = 0; i < MIN(msg_scrollsize(), msg_grid.Rows); i++) {
+        grid_clear_line(&msg_grid, msg_grid.line_offset[i],
+                        (int)msg_grid.Columns, false);
+      }
+    }
+  } else {
+    redraw_all_later(NOT_VALID);
+  }
+  msg_scrolled = 0;
+  msg_scrolled_at_flush = 0;
 }
 
 /*
@@ -2260,6 +2463,7 @@ static msgchunk_T *disp_sb_line(int row, msgchunk_T *smp)
       break;
     mp = mp->sb_next;
   }
+
   return mp->sb_next;
 }
 
@@ -2268,9 +2472,10 @@ static msgchunk_T *disp_sb_line(int row, msgchunk_T *smp)
  */
 static void t_puts(int *t_col, const char_u *t_s, const char_u *s, int attr)
 {
+  attr = hl_combine_attr(HL_ATTR(HLF_MSG), attr);
   // Output postponed text.
   msg_didout = true;  // Remember that line is not empty.
-  grid_puts_len(&default_grid, (char_u *)t_s, (int)(s - t_s), msg_row, msg_col,
+  grid_puts_len(&msg_grid_adj, (char_u *)t_s, (int)(s - t_s), msg_row, msg_col,
                 attr);
   msg_col += *t_col;
   *t_col = 0;
@@ -2296,18 +2501,19 @@ int msg_use_printf(void)
 static void msg_puts_printf(const char *str, const ptrdiff_t maxlen)
 {
   const char *s = str;
-  char buf[4];
+  char buf[7];
   char *p;
 
   while ((maxlen < 0 || s - str < maxlen) && *s != NUL) {
+    int len = utf_ptr2len((const char_u *)s);
     if (!(silent_mode && p_verbose == 0)) {
       // NL --> CR NL translation (for Unix, not for "--version")
       p = &buf[0];
       if (*s == '\n' && !info_message) {
         *p++ = '\r';
       }
-      *p++ = *s;
-      *p = '\0';
+      memcpy(p, s, len);
+      *(p + len) = '\0';
       if (info_message) {
         mch_msg(buf);
       } else {
@@ -2315,21 +2521,22 @@ static void msg_puts_printf(const char *str, const ptrdiff_t maxlen)
       }
     }
 
+    int cw = utf_char2cells(utf_ptr2char((const char_u *)s));
     // primitive way to compute the current column
     if (cmdmsg_rl) {
       if (*s == '\r' || *s == '\n') {
         msg_col = Columns - 1;
       } else {
-        msg_col--;
+        msg_col -= cw;
       }
     } else {
       if (*s == '\r' || *s == '\n') {
         msg_col = 0;
       } else {
-        msg_col++;
+        msg_col += cw;
       }
     }
-    s++;
+    s += len;
   }
   msg_didout = true;  // assume that line is not empty
 }
@@ -2349,6 +2556,7 @@ static int do_more_prompt(int typed_char)
   int c;
   int retval = FALSE;
   int toscroll;
+  bool to_redraw = false;
   msgchunk_T  *mp_last = NULL;
   msgchunk_T  *mp;
   int i;
@@ -2380,8 +2588,9 @@ static int do_more_prompt(int typed_char)
     if (used_typed_char != NUL) {
       c = used_typed_char;              /* was typed at hit-enter prompt */
       used_typed_char = NUL;
-    } else
-      c = get_keystroke();
+    } else {
+      c = get_keystroke(resize_events);
+    }
 
 
     toscroll = 0;
@@ -2454,31 +2663,44 @@ static int do_more_prompt(int typed_char)
       lines_left = Rows - 1;
       break;
 
+    case K_EVENT:
+      // only resize_events are processed here
+      // Attempt to redraw the screen. sb_text doesn't support reflow
+      // so this only really works for vertical resize.
+      multiqueue_process_events(resize_events);
+      to_redraw = true;
+      break;
+
     default:                    /* no valid response */
       msg_moremsg(TRUE);
       continue;
     }
 
-    if (toscroll != 0) {
-      if (toscroll < 0) {
-        /* go to start of last line */
-        if (mp_last == NULL)
+    // code assumes we only do one at a time
+    assert((toscroll == 0) || !to_redraw);
+
+    if (toscroll != 0 || to_redraw) {
+      if (toscroll < 0 || to_redraw) {
+        // go to start of last line
+        if (mp_last == NULL) {
           mp = msg_sb_start(last_msgchunk);
-        else if (mp_last->sb_prev != NULL)
+        } else if (mp_last->sb_prev != NULL) {
           mp = msg_sb_start(mp_last->sb_prev);
-        else
+        } else {
           mp = NULL;
+        }
 
         /* go to start of line at top of the screen */
         for (i = 0; i < Rows - 2 && mp != NULL && mp->sb_prev != NULL;
              ++i)
           mp = msg_sb_start(mp->sb_prev);
 
-        if (mp != NULL && mp->sb_prev != NULL) {
-          /* Find line to be displayed at top. */
-          for (i = 0; i > toscroll; --i) {
-            if (mp == NULL || mp->sb_prev == NULL)
+        if (mp != NULL && (mp->sb_prev != NULL || to_redraw)) {
+          // Find line to be displayed at top
+          for (i = 0; i > toscroll; i--) {
+            if (mp == NULL || mp->sb_prev == NULL) {
               break;
+            }
             mp = msg_sb_start(mp->sb_prev);
             if (mp_last == NULL)
               mp_last = msg_sb_start(last_msgchunk);
@@ -2486,38 +2708,49 @@ static int do_more_prompt(int typed_char)
               mp_last = msg_sb_start(mp_last->sb_prev);
           }
 
-          if (toscroll == -1) {
-            grid_ins_lines(&default_grid, 0, 1, (int)Rows, 0, (int)Columns);
-            grid_fill(&default_grid, 0, 1, 0, (int)Columns, ' ', ' ', 0);
+          if (toscroll == -1 && !to_redraw) {
+            grid_ins_lines(&msg_grid_adj, 0, 1, Rows, 0, Columns);
+            grid_fill(&msg_grid_adj, 0, 1, 0, Columns, ' ', ' ',
+                      HL_ATTR(HLF_MSG));
             // display line at top
             (void)disp_sb_line(0, mp);
           } else {
-            /* redisplay all lines */
-            screenclear();
-            for (i = 0; mp != NULL && i < Rows - 1; ++i) {
+            // redisplay all lines
+            // TODO(bfredl): this case is not optimized (though only concerns
+            // event fragmentization, not unnecessary scroll events).
+            grid_fill(&msg_grid_adj, 0, Rows, 0, Columns, ' ', ' ',
+                      HL_ATTR(HLF_MSG));
+            for (i = 0; mp != NULL && i < Rows - 1; i++) {
               mp = disp_sb_line(i, mp);
               ++msg_scrolled;
             }
+            to_redraw = false;
           }
           toscroll = 0;
         }
       } else {
         /* First display any text that we scrolled back. */
         while (toscroll > 0 && mp_last != NULL) {
-          /* scroll up, display line at bottom */
-          msg_scroll_up();
+          if (msg_do_throttle() && !msg_grid.throttled) {
+            // Tricky: we redraw at one line higher than usual. Therefore
+            // the non-flushed area is one line larger.
+            msg_scrolled_at_flush--;
+            msg_grid_scroll_discount++;
+          }
+          // scroll up, display line at bottom
+          msg_scroll_up(true);
           inc_msg_scrolled();
-          grid_fill(&default_grid, (int)Rows - 2, (int)Rows - 1, 0,
-                    (int)Columns, ' ', ' ', 0);
-          mp_last = disp_sb_line((int)Rows - 2, mp_last);
-          --toscroll;
+          grid_fill(&msg_grid_adj, Rows-2, Rows-1, 0, Columns, ' ', ' ',
+                    HL_ATTR(HLF_MSG));
+          mp_last = disp_sb_line(Rows - 2, mp_last);
+          toscroll--;
         }
       }
 
       if (toscroll <= 0) {
         // displayed the requested text, more prompt again
-        grid_fill(&default_grid, (int)Rows - 1, (int)Rows, 0,
-                  (int)Columns, ' ', ' ', 0);
+        grid_fill(&msg_grid_adj, Rows - 1, Rows, 0, Columns, ' ', ' ',
+                  HL_ATTR(HLF_MSG));
         msg_moremsg(false);
         continue;
       }
@@ -2530,8 +2763,12 @@ static int do_more_prompt(int typed_char)
   }
 
   // clear the --more-- message
-  grid_fill(&default_grid, (int)Rows - 1, (int)Rows, 0, (int)Columns, ' ', ' ',
-            0);
+  grid_fill(&msg_grid_adj, Rows - 1, Rows, 0, Columns, ' ', ' ',
+            HL_ATTR(HLF_MSG));
+  redraw_cmdline = true;
+  clear_cmdline = false;
+  mode_displayed = false;
+
   State = oldState;
   setmouse();
   if (quit_more) {
@@ -2545,81 +2782,34 @@ static int do_more_prompt(int typed_char)
   return retval;
 }
 
-#if defined(USE_MCH_ERRMSG)
-
-#ifdef mch_errmsg
-# undef mch_errmsg
-#endif
-#ifdef mch_msg
-# undef mch_msg
-#endif
-
-/*
- * Give an error message.  To be used when the screen hasn't been initialized
- * yet.  When stderr can't be used, collect error messages until the GUI has
- * started and they can be displayed in a message box.
- */
-void mch_errmsg(const char *const str)
-  FUNC_ATTR_NONNULL_ALL
+#if defined(WIN32)
+void mch_errmsg(char *str)
 {
-#ifdef UNIX
-  /* On Unix use stderr if it's a tty.
-   * When not going to start the GUI also use stderr.
-   * On Mac, when started from Finder, stderr is the console. */
-  if (os_isatty(2)) {
-    fprintf(stderr, "%s", str);
-    return;
+  assert(str != NULL);
+  wchar_t *utf16str;
+  int r = utf8_to_utf16(str, -1, &utf16str);
+  if (r != 0) {
+    fprintf(stderr, "utf8_to_utf16 failed: %d", r);
+  } else {
+    fwprintf(stderr, L"%ls", utf16str);
+    xfree(utf16str);
   }
-#endif
-
-  /* avoid a delay for a message that isn't there */
-  emsg_on_display = FALSE;
-
-  const size_t len = strlen(str) + 1;
-  if (error_ga.ga_data == NULL) {
-    ga_set_growsize(&error_ga, 80);
-    error_ga.ga_itemsize = 1;
-  }
-  ga_grow(&error_ga, len);
-  memmove(error_ga.ga_data + error_ga.ga_len, str, len);
-#ifdef UNIX
-  /* remove CR characters, they are displayed */
-  {
-    char_u      *p;
-
-    p = (char_u *)error_ga.ga_data + error_ga.ga_len;
-    for (;; ) {
-      p = vim_strchr(p, '\r');
-      if (p == NULL)
-        break;
-      *p = ' ';
-    }
-  }
-#endif
-  --len;              /* don't count the NUL at the end */
-  error_ga.ga_len += len;
 }
 
-/*
- * Give a message.  To be used when the screen hasn't been initialized yet.
- * When there is no tty, collect messages until the GUI has started and they
- * can be displayed in a message box.
- */
+// Give a message.  To be used when the UI is not initialized yet.
 void mch_msg(char *str)
 {
-#ifdef UNIX
-  /* On Unix use stdout if we have a tty.  This allows "vim -h | more" and
-   * uses mch_errmsg() when started from the desktop.
-   * When not going to start the GUI also use stdout.
-   * On Mac, when started from Finder, stderr is the console. */
-  if (os_isatty(2)) {
-    printf("%s", str);
-    return;
+  assert(str != NULL);
+  wchar_t *utf16str;
+  int r = utf8_to_utf16(str, -1, &utf16str);
+  if (r != 0) {
+    fprintf(stderr, "utf8_to_utf16 failed: %d", r);
+  } else {
+    wprintf(L"%ls", utf16str);
+    xfree(utf16str);
   }
-# endif
-  mch_errmsg(str);
 }
-#endif /* USE_MCH_ERRMSG */
+#endif  // WIN32
 
 /*
  * Put a character on the screen at the current message position and advance
@@ -2627,8 +2817,9 @@ void mch_msg(char *str)
  */
 static void msg_screen_putchar(int c, int attr)
 {
+  attr = hl_combine_attr(HL_ATTR(HLF_MSG), attr);
   msg_didout = true;            // remember that line is not empty
-  grid_putchar(&default_grid, c, msg_row, msg_col, attr);
+  grid_putchar(&msg_grid_adj, c, msg_row, msg_col, attr);
   if (cmdmsg_rl) {
     if (--msg_col == 0) {
       msg_col = Columns;
@@ -2647,12 +2838,12 @@ void msg_moremsg(int full)
   int attr;
   char_u      *s = (char_u *)_("-- More --");
 
-  attr = HL_ATTR(HLF_M);
-  grid_puts(&default_grid, s, (int)Rows - 1, 0, attr);
+  attr = hl_combine_attr(HL_ATTR(HLF_MSG), HL_ATTR(HLF_M));
+  grid_puts(&msg_grid_adj, s, Rows - 1, 0, attr);
   if (full) {
-    grid_puts(&default_grid, (char_u *)
+    grid_puts(&msg_grid_adj, (char_u *)
               _(" SPACE/d/j: screen/page/line down, b/u/k: up, q: quit "),
-              (int)Rows - 1, vim_strsize(s), attr);
+              Rows - 1, vim_strsize(s), attr);
   }
 }
 
@@ -2705,12 +2896,24 @@ void msg_clr_eos_force(void)
     return;
   }
   int msg_startcol = (cmdmsg_rl) ? 0 : msg_col;
-  int msg_endcol = (cmdmsg_rl) ? msg_col + 1 : (int)Columns;
+  int msg_endcol = (cmdmsg_rl) ? msg_col + 1 : Columns;
 
-  grid_fill(&default_grid, msg_row, msg_row + 1, msg_startcol, msg_endcol, ' ',
-            ' ', 0);
-  grid_fill(&default_grid, msg_row + 1, (int)Rows, 0, (int)Columns, ' ', ' ',
-            0);
+  if (msg_grid.chars && msg_row < msg_grid_pos) {
+    // TODO(bfredl): ugly, this state should already been validated at this
+    // point. But msg_clr_eos() is called in a lot of places.
+    msg_row = msg_grid_pos;
+  }
+
+  grid_fill(&msg_grid_adj, msg_row, msg_row + 1, msg_startcol, msg_endcol, ' ',
+            ' ', HL_ATTR(HLF_MSG));
+  grid_fill(&msg_grid_adj, msg_row + 1, Rows, 0, Columns, ' ', ' ',
+            HL_ATTR(HLF_MSG));
+
+  redraw_cmdline = true;  // overwritten the command line
+  if (msg_row < Rows-1 || msg_col == (cmdmsg_rl ? Columns : 0)) {
+    clear_cmdline = false;  // command line has been cleared
+    mode_displayed = false;  // mode cleared or overwritten
+  }
 }
 
 /*
@@ -2741,10 +2944,11 @@ int msg_end(void)
     return FALSE;
   }
 
-  // @TODO(bfredl): calling flush here inhibits substantial performance
-  // improvements. Caller should call ui_flush before waiting on user input or
-  // CPU busywork.
-  ui_flush();  // calls msg_ext_ui_flush
+  // NOTE: ui_flush() used to be called here. This had to be removed, as it
+  // inhibited substantial performance improvements. It is assumed that relevant
+  // callers invoke ui_flush() before going into CPU busywork, or restricted
+  // event processing after displaying a message to the user.
+  msg_ext_ui_flush();
   return true;
 }
 
@@ -2763,6 +2967,7 @@ void msg_ext_ui_flush(void)
     }
     msg_ext_kind = NULL;
     msg_ext_chunks = (Array)ARRAY_DICT_INIT;
+    msg_ext_cur_len = 0;
     msg_ext_overwrite = false;
   }
 }
@@ -2775,6 +2980,7 @@ void msg_ext_flush_showmode(void)
     msg_ext_emit_chunk();
     ui_call_msg_showmode(msg_ext_chunks);
     msg_ext_chunks = (Array)ARRAY_DICT_INIT;
+    msg_ext_cur_len = 0;
   }
 }
 
@@ -2790,12 +2996,22 @@ void msg_ext_clear(bool force)
   msg_ext_keep_after_cmdline = false;
 }
 
-void msg_ext_check_prompt(void)
+void msg_ext_clear_later(void)
 {
-  // Redraw after cmdline is expected to clear messages.
-  if (msg_ext_did_cmdline) {
+  if (msg_ext_is_visible()) {
+    msg_ext_need_clear = true;
+    if (must_redraw < VALID) {
+      must_redraw = VALID;
+    }
+  }
+}
+
+void msg_ext_check_clear(void)
+{
+  // Redraw after cmdline or prompt is expected to clear messages.
+  if (msg_ext_need_clear) {
     msg_ext_clear(true);
-    msg_ext_did_cmdline = false;
+    msg_ext_need_clear = false;
   }
 }
 
@@ -2971,7 +3187,7 @@ int verbose_open(void)
     /* Only give the error message once. */
     verbose_did_open = TRUE;
 
-    verbose_fd = mch_fopen((char *)p_vfile, "a");
+    verbose_fd = os_fopen((char *)p_vfile, "a");
     if (verbose_fd == NULL) {
       EMSG2(_(e_notopen), p_vfile);
       return FAIL;
@@ -2986,21 +3202,26 @@ int verbose_open(void)
  */
 void give_warning(char_u *message, bool hl) FUNC_ATTR_NONNULL_ARG(1)
 {
-  /* Don't do this for ":silent". */
-  if (msg_silent != 0)
+  // Don't do this for ":silent".
+  if (msg_silent != 0) {
     return;
+  }
 
-  /* Don't want a hit-enter prompt here. */
-  ++no_wait_return;
+  // Don't want a hit-enter prompt here.
+  no_wait_return++;
 
-  set_vim_var_string(VV_WARNINGMSG, (char *) message, -1);
-  xfree(keep_msg);
-  keep_msg = NULL;
+  set_vim_var_string(VV_WARNINGMSG, (char *)message, -1);
+  XFREE_CLEAR(keep_msg);
   if (hl) {
     keep_msg_attr = HL_ATTR(HLF_W);
   } else {
     keep_msg_attr = 0;
   }
+
+  if (msg_ext_kind == NULL) {
+    msg_ext_set_kind("wmsg");
+  }
+
   if (msg_attr((const char *)message, keep_msg_attr) && msg_scrolled == 0) {
     set_keep_msg(message, keep_msg_attr);
   }
@@ -3008,7 +3229,7 @@ void give_warning(char_u *message, bool hl) FUNC_ATTR_NONNULL_ARG(1)
   msg_nowait = true;   // Don't wait for this message.
   msg_col = 0;
 
-  --no_wait_return;
+  no_wait_return--;
 }
 
 void give_warning2(char_u *const message, char_u *const a1, bool hl)
@@ -3024,6 +3245,14 @@ void msg_advance(int col)
 {
   if (msg_silent != 0) {        /* nothing to advance to */
     msg_col = col;              /* for redirection, may fill it up later */
+    return;
+  }
+  if (ui_has(kUIMessages)) {
+    // TODO(bfredl): use byte count as a basic proxy.
+    // later on we might add proper support for formatted messages.
+    while (msg_ext_cur_len < (size_t)col) {
+      msg_putchar(' ');
+    }
     return;
   }
   if (col >= Columns)           /* not enough room */
@@ -3094,8 +3323,8 @@ do_dialog (
   hotkeys = msg_show_console_dialog(message, buttons, dfltbutton);
 
   for (;; ) {
-    /* Get a typed character directly from the user. */
-    c = get_keystroke();
+    // Get a typed character directly from the user.
+    c = get_keystroke(NULL);
     switch (c) {
     case CAR:                 /* User accepts default option */
     case NL:
@@ -3341,6 +3570,7 @@ void display_confirm_msg(void)
   // Avoid that 'q' at the more prompt truncates the message here.
   confirm_msg_used++;
   if (confirm_msg != NULL) {
+    msg_ext_set_kind("confirm");
     msg_puts_attr((const char *)confirm_msg, HL_ATTR(HLF_M));
   }
   confirm_msg_used--;

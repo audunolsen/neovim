@@ -1,7 +1,6 @@
 -- Test server -> client RPC scenarios. Note: unlike `rpcnotify`, to evaluate
 -- `rpcrequest` calls we need the client event loop to be running.
 local helpers = require('test.functional.helpers')(after_each)
-local Paths = require('test.config.paths')
 
 local clear, nvim, eval = helpers.clear, helpers.nvim, helpers.eval
 local eq, neq, run, stop = helpers.eq, helpers.neq, helpers.run, helpers.stop
@@ -11,7 +10,7 @@ local ok = helpers.ok
 local meths = helpers.meths
 local spawn, merge_args = helpers.spawn, helpers.merge_args
 local set_session = helpers.set_session
-local expect_err = helpers.expect_err
+local pcall_err = helpers.pcall_err
 
 describe('server -> client', function()
   local cid
@@ -170,8 +169,7 @@ describe('server -> client', function()
         if method == "notification" then
           eq('done!', eval('rpcrequest('..cid..', "nested")'))
         elseif method == "nested_done" then
-          -- this should never have been sent
-          ok(false)
+          ok(false, 'this should never have been sent')
         end
       end
 
@@ -182,7 +180,7 @@ describe('server -> client', function()
   end)
 
   describe('recursive (child) nvim client', function()
-    if os.getenv("TRAVIS") and helpers.os_name() == "osx" then
+    if helpers.isCI('travis') and helpers.is_os('mac') then
       -- XXX: Hangs Travis macOS since e9061117a5b8f195c3f26a5cb94e18ddd7752d86.
       pending("[Hangs on Travis macOS. #5002]", function() end)
       return
@@ -222,8 +220,8 @@ describe('server -> client', function()
     end)
 
     it('returns an error if the request failed', function()
-      expect_err('Vim:Invalid method: does%-not%-exist',
-                 eval, "rpcrequest(vim, 'does-not-exist')")
+      eq("Vim:Error invoking 'does-not-exist' on channel 3:\nInvalid method: does-not-exist",
+         pcall_err(eval, "rpcrequest(vim, 'does-not-exist')"))
     end)
   end)
 
@@ -243,10 +241,14 @@ describe('server -> client', function()
         \ 'rpc': v:true
         \ }
       ]])
-      local lua_prog = Paths.test_lua_prg
-      meths.set_var("args", {lua_prog, 'test/functional/api/rpc_fixture.lua'})
+      meths.set_var("args", {
+        helpers.test_lua_prg,
+        'test/functional/api/rpc_fixture.lua',
+        package.path,
+        package.cpath,
+      })
       jobid = eval("jobstart(g:args, g:job_opts)")
-      neq(0, 'jobid')
+      neq(0, jobid)
     end)
 
     after_each(function()
@@ -256,7 +258,11 @@ describe('server -> client', function()
     if helpers.pending_win32(pending) then return end
 
     it('rpc and text stderr can be combined', function()
-      eq("ok",funcs.rpcrequest(jobid, "poll"))
+      local status, rv = pcall(funcs.rpcrequest, jobid, 'poll')
+      if not status then
+        error(string.format('missing nvim Lua module? (%s)', rv))
+      end
+      eq('ok', rv)
       funcs.rpcnotify(jobid, "ping")
       eq({'notification', 'pong', {}}, next_msg())
       eq("done!",funcs.rpcrequest(jobid, "write_stderr", "fluff\n"))
@@ -341,7 +347,7 @@ describe('server -> client', function()
 
   describe('connecting to its own pipe address', function()
     it('does not deadlock', function()
-      if not os.getenv("TRAVIS") and helpers.os_name() == "osx" then
+      if not helpers.isCI('travis') and helpers.is_os('mac') then
         -- It does, in fact, deadlock on QuickBuild. #6851
         pending("deadlocks on QuickBuild", function() end)
         return

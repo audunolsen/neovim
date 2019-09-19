@@ -586,7 +586,7 @@ spell_load_file (
   int c = 0;
   int res;
 
-  fd = mch_fopen((char *)fname, "r");
+  fd = os_fopen((char *)fname, "r");
   if (fd == NULL) {
     if (!silent)
       EMSG2(_(e_notopen), fname);
@@ -885,9 +885,10 @@ void suggest_load_files(void)
         continue;
       }
       STRCPY(dotp, ".sug");
-      fd = mch_fopen((char *)slang->sl_fname, "r");
-      if (fd == NULL)
+      fd = os_fopen((char *)slang->sl_fname, "r");
+      if (fd == NULL) {
         goto nextone;
+      }
 
       // <SUGHEADER>: <fileID> <versionnr> <timestamp>
       for (i = 0; i < VIMSUGMAGICL; ++i)
@@ -955,8 +956,9 @@ someerror:
             break;
         }
         if (ml_append_buf(slang->sl_sugbuf, (linenr_T)wordnr,
-                ga.ga_data, ga.ga_len, TRUE) == FAIL)
+                          ga.ga_data, ga.ga_len, true) == FAIL) {
           goto someerror;
+        }
       }
       ga_clear(&ga);
 
@@ -1445,8 +1447,7 @@ static int read_compound(FILE *fd, slang_T *slang, int len)
     // Copy flag to "sl_comprules", unless we run into a wildcard.
     if (crp != NULL) {
       if (c == '?' || c == '+' || c == '*') {
-        xfree(slang->sl_comprules);
-        slang->sl_comprules = NULL;
+        XFREE_CLEAR(slang->sl_comprules);
         crp = NULL;
       } else
         *crp++ = c;
@@ -1832,24 +1833,30 @@ int spell_check_msm(void)
   if (!ascii_isdigit(*p))
     return FAIL;
   // block count = (value * 1024) / SBLOCKSIZE (but avoid overflow)
-  start = (getdigits_long(&p) * 10) / (SBLOCKSIZE / 102);
-  if (*p != ',')
+  start = (getdigits_long(&p, true, 0) * 10) / (SBLOCKSIZE / 102);
+  if (*p != ',') {
     return FAIL;
-  ++p;
-  if (!ascii_isdigit(*p))
+  }
+  p++;
+  if (!ascii_isdigit(*p)) {
     return FAIL;
-  incr = (getdigits_long(&p) * 102) / (SBLOCKSIZE / 10);
-  if (*p != ',')
+  }
+  incr = (getdigits_long(&p, true, 0) * 102) / (SBLOCKSIZE / 10);
+  if (*p != ',') {
     return FAIL;
-  ++p;
-  if (!ascii_isdigit(*p))
+  }
+  p++;
+  if (!ascii_isdigit(*p)) {
     return FAIL;
-  added = getdigits_long(&p) * 1024;
-  if (*p != NUL)
+  }
+  added = getdigits_long(&p, true, 0) * 1024;
+  if (*p != NUL) {
     return FAIL;
+  }
 
-  if (start == 0 || incr == 0 || added == 0 || incr > start)
+  if (start == 0 || incr == 0 || added == 0 || incr > start) {
     return FAIL;
+  }
 
   compress_start = start;
   compress_inc = incr;
@@ -1984,7 +1991,7 @@ static afffile_T *spell_read_aff(spellinfo_T *spin, char_u *fname)
   char_u      *sofoto = NULL;           // SOFOTO value
 
   // Open the file.
-  fd = mch_fopen((char *)fname, "r");
+  fd = os_fopen((char *)fname, "r");
   if (fd == NULL) {
     EMSG2(_(e_notopen), fname);
     return NULL;
@@ -2786,7 +2793,7 @@ static unsigned get_affitem(int flagtype, char_u **pp)
       ++*pp;            // always advance, avoid getting stuck
       return 0;
     }
-    res = getdigits_int(pp);
+    res = getdigits_int(pp, true, 0);
   } else {
     res = mb_ptr2char_adv((const char_u **)pp);
     if (flagtype == AFT_LONG || (flagtype == AFT_CAPLONG
@@ -2905,7 +2912,7 @@ static bool flag_in_afflist(int flagtype, char_u *afflist, unsigned flag)
 
   case AFT_NUM:
     for (p = afflist; *p != NUL; ) {
-      int digits = getdigits_int(&p);
+      int digits = getdigits_int(&p, true, 0);
       assert(digits >= 0);
       n = (unsigned int)digits;
       if (n == flag)
@@ -3019,7 +3026,7 @@ static int spell_read_dic(spellinfo_T *spin, char_u *fname, afffile_T *affile)
   int duplicate = 0;
 
   // Open the file.
-  fd = mch_fopen((char *)fname, "r");
+  fd = os_fopen((char *)fname, "r");
   if (fd == NULL) {
     EMSG2(_(e_notopen), fname);
     return FAIL;
@@ -3539,7 +3546,7 @@ static int spell_read_wordfile(spellinfo_T *spin, char_u *fname)
   int regionmask;
 
   // Open the file.
-  fd = mch_fopen((char *)fname, "r");
+  fd = os_fopen((char *)fname, "r");
   if (fd == NULL) {
     EMSG2(_(e_notopen), fname);
     return FAIL;
@@ -4185,7 +4192,7 @@ static int write_vim_spell(spellinfo_T *spin, char_u *fname)
   int retval = OK;
   int regionmask;
 
-  FILE *fd = mch_fopen((char *)fname, "w");
+  FILE *fd = os_fopen((char *)fname, "w");
   if (fd == NULL) {
     EMSG2(_(e_notopen), fname);
     return FAIL;
@@ -4920,9 +4927,10 @@ sug_filltable (
       ((char_u *)gap->ga_data)[gap->ga_len++] = NUL;
 
       if (ml_append_buf(spin->si_spellbuf, (linenr_T)wordnr,
-              gap->ga_data, gap->ga_len, TRUE) == FAIL)
+                        gap->ga_data, gap->ga_len, true) == FAIL) {
         return -1;
-      ++wordnr;
+      }
+      wordnr++;
 
       // Remove extra NUL entries, we no longer need them. We don't
       // bother freeing the nodes, the won't be reused anyway.
@@ -4985,7 +4993,7 @@ static int offset2bytes(int nr, char_u *buf)
 static void sug_write(spellinfo_T *spin, char_u *fname)
 {
   // Create the file.  Note that an existing file is silently overwritten!
-  FILE *fd = mch_fopen((char *)fname, "w");
+  FILE *fd = os_fopen((char *)fname, "w");
   if (fd == NULL) {
     EMSG2(_(e_notopen), fname);
     return;
@@ -5364,7 +5372,7 @@ spell_add_word (
   if (bad || undo) {
     // When the word appears as good word we need to remove that one,
     // since its flags sort before the one with WF_BANNED.
-    fd = mch_fopen((char *)fname, "r");
+    fd = os_fopen((char *)fname, "r");
     if (fd != NULL) {
       while (!vim_fgets(line, MAXWLEN * 2, fd)) {
         fpos = fpos_next;
@@ -5375,7 +5383,7 @@ spell_add_word (
           // the start of the line.  Mixing reading and writing
           // doesn't work for all systems, close the file first.
           fclose(fd);
-          fd = mch_fopen((char *)fname, "r+");
+          fd = os_fopen((char *)fname, "r+");
           if (fd == NULL) {
             break;
           }
@@ -5398,7 +5406,7 @@ spell_add_word (
   }
 
   if (!undo) {
-    fd = mch_fopen((char *)fname, "a");
+    fd = os_fopen((char *)fname, "a");
     if (fd == NULL && new_spf) {
       char_u *p;
 
@@ -5414,7 +5422,7 @@ spell_add_word (
         *p = NUL;
         os_mkdir((char *)fname, 0755);
         *p = c;
-        fd = mch_fopen((char *)fname, "a");
+        fd = os_fopen((char *)fname, "a");
       }
     }
 

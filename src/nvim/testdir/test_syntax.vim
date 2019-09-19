@@ -389,7 +389,7 @@ endfunc
 
 func Test_ownsyntax_completion()
   call feedkeys(":ownsyntax java\<C-A>\<C-B>\"\<CR>", 'tx')
-  call assert_equal('"ownsyntax java javacc javascript', @:)
+  call assert_equal('"ownsyntax java javacc javascript javascriptreact', @:)
 endfunc
 
 func Test_highlight_invalid_arg()
@@ -466,9 +466,11 @@ func Test_bg_detection()
   set bg=dark
   hi Normal ctermbg=12
   call assert_equal('dark', &bg)
+
+  hi Normal ctermbg=NONE
 endfunc
 
-fun Test_synstack_synIDtrans()
+func Test_synstack_synIDtrans()
   new
   setfiletype c
   syntax on
@@ -492,6 +494,45 @@ fun Test_synstack_synIDtrans()
   bw!
 endfunc
 
+" Check highlighting for a small piece of C code with a screen dump.
+func Test_syntax_c()
+  if !CanRunVimInTerminal()
+    throw 'Skipped: cannot make screendumps'
+  endif
+  call writefile([
+	\ '/* comment line at the top */',
+	\ '  int',
+	\ 'main(int argc, char **argv)// another comment',
+	\ '{',
+	\ '#if 0',
+	\ '   int   not_used;',
+	\ '#else',
+	\ '   int   used;',
+	\ '#endif',
+	\ '   printf("Just an example piece of C code\n");',
+	\ '   return 0x0ff;',
+	\ '}',
+	\ '   static void',
+	\ 'myFunction(const double count, struct nothing, long there) {',
+	\ '  // 123: nothing to read here',
+	\ '  for (int i = 0; i < count; ++i) {',
+	\ '    break;',
+	\ '  }',
+	\ '}',
+	\ ], 'Xtest.c')
+
+  " This makes the default for 'background' use "dark", check that the
+  " response to t_RB corrects it to "light".
+  let $COLORFGBG = '15;0'
+
+  let buf = RunVimInTerminal('Xtest.c', {})
+  call VerifyScreenDump(buf, 'Test_syntax_c_01')
+  call StopVimInTerminal(buf)
+
+  let $COLORFGBG = ''
+  call delete('Xtest.c')
+endfun
+
 " Using \z() in a region with NFA failing should not crash.
 func Test_syn_wrong_z_one()
   new
@@ -501,5 +542,39 @@ func Test_syn_wrong_z_one()
   redraw!
   redraw!
   " call test_override("ALL", 0)
+  bwipe!
+endfunc
+
+func Test_syntax_hangs()
+  if !has('reltime') || !has('float') || !has('syntax')
+    return
+  endif
+
+  " This pattern takes a long time to match, it should timeout.
+  new
+  call setline(1, ['aaa', repeat('abc ', 1000), 'ccc'])
+  let start = reltime()
+  set nolazyredraw redrawtime=101
+  syn match Error /\%#=1a*.*X\@<=b*/
+  redraw
+  let elapsed = reltimefloat(reltime(start))
+  call assert_true(elapsed > 0.1)
+  call assert_true(elapsed < 1.0)
+
+  " second time syntax HL is disabled
+  let start = reltime()
+  redraw
+  let elapsed = reltimefloat(reltime(start))
+  call assert_true(elapsed < 0.1)
+
+  " after CTRL-L the timeout flag is reset
+  let start = reltime()
+  exe "normal \<C-L>"
+  redraw
+  let elapsed = reltimefloat(reltime(start))
+  call assert_true(elapsed > 0.1)
+  call assert_true(elapsed < 1.0)
+
+  set redrawtime&
   bwipe!
 endfunc

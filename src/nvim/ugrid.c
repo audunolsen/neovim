@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <limits.h>
 
+#include "nvim/assert.h"
 #include "nvim/vim.h"
 #include "nvim/ui.h"
 #include "nvim/ugrid.h"
@@ -72,8 +73,9 @@ void ugrid_scroll(UGrid *grid, int top, int bot, int left, int right, int count)
   for (i = start; i != stop; i += step) {
     UCell *target_row = grid->cells[i] + left;
     UCell *source_row = grid->cells[i + count] + left;
+    assert(right >= left && left >= 0);
     memcpy(target_row, source_row,
-           sizeof(UCell) * (size_t)(right - left + 1));
+           sizeof(UCell) * ((size_t)right - (size_t)left + 1));
   }
 }
 
@@ -95,8 +97,7 @@ static void destroy_cells(UGrid *grid)
     for (int i = 0; i < grid->height; i++) {
       xfree(grid->cells[i]);
     }
-    xfree(grid->cells);
-    grid->cells = NULL;
+    XFREE_CLEAR(grid->cells);
   }
 }
 

@@ -1,5 +1,5 @@
-
 local helpers = require('test.functional.helpers')(after_each)
+local uname = helpers.uname
 local clear, eq, eval, next_msg, ok, source = helpers.clear, helpers.eq,
    helpers.eval, helpers.next_msg, helpers.ok, helpers.source
 local command, funcs, meths = helpers.command, helpers.funcs, helpers.meths
@@ -7,6 +7,7 @@ local sleep = helpers.sleep
 local spawn, nvim_argv = helpers.spawn, helpers.nvim_argv
 local set_session = helpers.set_session
 local nvim_prog = helpers.nvim_prog
+local is_os = helpers.is_os
 local retry = helpers.retry
 local expect_twostreams = helpers.expect_twostreams
 
@@ -138,9 +139,8 @@ describe('channels', function()
 
     command("call chansend(id, 'incomplet\004')")
 
-    local is_freebsd = eval("system('uname') =~? 'FreeBSD'") == 1
-    local bsdlike = is_freebsd or (helpers.os_name() == "osx")
-    print("bsdlike:", bsdlike)
+    local is_bsd = not not string.find(uname(), 'bsd')
+    local bsdlike = is_bsd or is_os('mac')
     local extra = bsdlike and "^D\008\008" or ""
     expect_twoline(id, "stdout",
                    "incomplet"..extra, "[1, ['incomplet'], 'stdin']", true)

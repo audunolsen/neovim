@@ -29,8 +29,10 @@
 #include "nvim/api/vim.h"
 #include "nvim/ascii.h"
 #include "nvim/assert.h"
+#include "nvim/channel.h"
 #include "nvim/vim.h"
 #include "nvim/buffer.h"
+#include "nvim/change.h"
 #include "nvim/charset.h"
 #include "nvim/cursor.h"
 #include "nvim/diff.h"
@@ -64,6 +66,7 @@
 #include "nvim/quickfix.h"
 #include "nvim/regexp.h"
 #include "nvim/screen.h"
+#include "nvim/sign.h"
 #include "nvim/spell.h"
 #include "nvim/strings.h"
 #include "nvim/syntax.h"
@@ -93,6 +96,11 @@ static char *e_auabort = N_("E855: Autocommands caused command to abort");
 
 // Number of times free_buffer() was called.
 static int buf_free_count = 0;
+
+typedef enum {
+  kBffClearWinInfo = 1,
+  kBffInitChangedtick = 2,
+} BufFreeFlags;
 
 // Read data from buffer for retrying.
 static int
@@ -136,7 +144,7 @@ read_buffer(
     if (!readonlymode && !BUFEMPTY()) {
       changed();
     } else if (retval != FAIL) {
-      unchanged(curbuf, false);
+      unchanged(curbuf, false, true);
     }
 
     apply_autocmds_retval(EVENT_STDINREADPOST, NULL, NULL, false,
@@ -291,7 +299,7 @@ int open_buffer(
       || (aborting() && vim_strchr(p_cpo, CPO_INTMOD) != NULL)) {
     changed();
   } else if (retval != FAIL && !read_stdin && !read_fifo) {
-    unchanged(curbuf, false);
+    unchanged(curbuf, false, true);
   }
   save_file_ff(curbuf);                 // keep this fileformat
 
@@ -616,9 +624,9 @@ void close_buffer(win_T *win, buf_T *buf, int action, int abort_if_last)
     free_buffer(buf);
   } else {
     if (del_buf) {
-      /* Free all internal variables and reset option values, to make
-       * ":bdel" compatible with Vim 5.7. */
-      free_buffer_stuff(buf, true);
+      // Free all internal variables and reset option values, to make
+      // ":bdel" compatible with Vim 5.7.
+      free_buffer_stuff(buf, kBffClearWinInfo | kBffInitChangedtick);
 
       // Make it look like a new buffer.
       buf->b_flags = BF_CHECK_RO | BF_NEVERLOADED;
@@ -633,13 +641,11 @@ void close_buffer(win_T *win, buf_T *buf, int action, int abort_if_last)
   }
 }
 
-/*
- * Make buffer not contain a file.
- */
+/// Make buffer not contain a file.
 void buf_clear_file(buf_T *buf)
 {
   buf->b_ml.ml_line_count = 1;
-  unchanged(buf, true);
+  unchanged(buf, true, true);
   buf->b_p_eol = true;
   buf->b_start_eol = true;
   buf->b_p_bomb = false;
@@ -753,7 +759,12 @@ static void free_buffer(buf_T *buf)
 {
   handle_unregister_buffer(buf);
   buf_free_count++;
-  free_buffer_stuff(buf, true);
+  // b:changedtick uses an item in buf_T.
+  free_buffer_stuff(buf, kBffClearWinInfo);
+  if (buf->b_vars->dv_refcount > DO_NOT_FREE_CNT) {
+    tv_dict_add(buf->b_vars,
+                tv_dict_item_copy((dictitem_T *)(&buf->changedtick_di)));
+  }
   unref_var_dict(buf->b_vars);
   aubuflocal_remove(buf);
   tv_dict_unref(buf->additional_data);
@@ -778,22 +789,19 @@ static void free_buffer(buf_T *buf)
   }
 }
 
-/*
- * Free stuff in the buffer for ":bdel" and when wiping out the buffer.
- */
-static void
-free_buffer_stuff(
-    buf_T *buf,
-    int free_options                       // free options as well
-)
+/// Free stuff in the buffer for ":bdel" and when wiping out the buffer.
+///
+/// @param buf  Buffer pointer
+/// @param free_flags  BufFreeFlags
+static void free_buffer_stuff(buf_T *buf, int free_flags)
 {
-  if (free_options) {
+  if (free_flags & kBffClearWinInfo) {
     clear_wininfo(buf);                 // including window-local options
     free_buf_options(buf, true);
     ga_clear(&buf->b_s.b_langp);
   }
   {
-    // Avoid loosing b:changedtick when deleting buffer: clearing variables
+    // Avoid losing b:changedtick when deleting buffer: clearing variables
     // implies using clear_tv() on b:changedtick and that sets changedtick to
     // zero.
     hashitem_T *const changedtick_hi = hash_find(
@@ -803,14 +811,15 @@ free_buffer_stuff(
   }
   vars_clear(&buf->b_vars->dv_hashtab);   // free all internal variables
   hash_init(&buf->b_vars->dv_hashtab);
-  buf_init_changedtick(buf);
-  uc_clear(&buf->b_ucmds);              // clear local user commands
-  buf_delete_signs(buf);                // delete any signs
-  bufhl_clear_all(buf);                // delete any highligts
+  if (free_flags & kBffInitChangedtick) {
+    buf_init_changedtick(buf);
+  }
+  uc_clear(&buf->b_ucmds);               // clear local user commands
+  buf_delete_signs(buf, (char_u *)"*");  // delete any signs
+  bufhl_clear_all(buf);                  // delete any highligts
   map_clear_int(buf, MAP_ALL_MODES, true, false);    // clear local mappings
   map_clear_int(buf, MAP_ALL_MODES, true, true);     // clear local abbrevs
-  xfree(buf->b_start_fenc);
-  buf->b_start_fenc = NULL;
+  XFREE_CLEAR(buf->b_start_fenc);
 
   buf_updates_unregister_all(buf);
 }
@@ -1007,8 +1016,9 @@ do_bufdel(
             break;
           }
           arg = p;
-        } else
-          bnr = getdigits_int(&arg);
+        } else {
+          bnr = getdigits_int(&arg, false, 0);
+        }
       }
     }
     if (!got_int && do_current
@@ -1425,7 +1435,7 @@ do_buffer(
       }
     }
     if (bufIsChanged(curbuf)) {
-      EMSG(_(e_nowrtmsg));
+      no_write_message();
       return FAIL;
     }
   }
@@ -1550,7 +1560,7 @@ void enter_buffer(buf_T *buf)
     diff_buf_add(curbuf);
   }
 
-  curwin->w_s = &(buf->b_s);
+  curwin->w_s = &(curbuf->b_s);
 
   // Cursor on first line by default.
   curwin->w_cursor.lnum = 1;
@@ -1620,9 +1630,20 @@ void do_autochdir(void)
     if (starting == 0
         && curbuf->b_ffname != NULL
         && vim_chdirfile(curbuf->b_ffname) == OK) {
+      post_chdir(kCdScopeGlobal, false);
       shorten_fnames(true);
     }
   }
+}
+
+void no_write_message(void)
+{
+  EMSG(_("E37: No write since last change (add ! to override)"));
+}
+
+void no_write_message_nobang(void)
+{
+  EMSG(_("E37: No write since last change"));
 }
 
 //
@@ -1717,11 +1738,8 @@ buf_T * buflist_new(char_u *ffname, char_u *sfname, linenr_T lnum, int flags)
    * buffer.)
    */
   buf = NULL;
-  if ((flags & BLN_CURBUF)
-      && curbuf != NULL
-      && curbuf->b_ffname == NULL
-      && curbuf->b_nwindows <= 1
-      && (curbuf->b_ml.ml_mfp == NULL || BUFEMPTY())) {
+  if ((flags & BLN_CURBUF) && curbuf_reusable()) {
+    assert(curbuf != NULL);
     buf = curbuf;
     /* It's like this buffer is deleted.  Watch out for autocommands that
      * change curbuf!  If that happens, allocate a new buffer anyway. */
@@ -1758,10 +1776,8 @@ buf_T * buflist_new(char_u *ffname, char_u *sfname, linenr_T lnum, int flags)
   buf->b_wininfo = xcalloc(1, sizeof(wininfo_T));
 
   if (ffname != NULL && (buf->b_ffname == NULL || buf->b_sfname == NULL)) {
-    xfree(buf->b_ffname);
-    buf->b_ffname = NULL;
-    xfree(buf->b_sfname);
-    buf->b_sfname = NULL;
+    XFREE_CLEAR(buf->b_ffname);
+    XFREE_CLEAR(buf->b_sfname);
     if (buf != curbuf) {
       free_buffer(buf);
     }
@@ -1777,7 +1793,7 @@ buf_T * buflist_new(char_u *ffname, char_u *sfname, linenr_T lnum, int flags)
     if (aborting()) {           // autocmds may abort script processing
       return NULL;
     }
-    free_buffer_stuff(buf, false);      // delete local variables et al.
+    free_buffer_stuff(buf, kBffInitChangedtick);  // delete local vars et al.
 
     // Init the options.
     buf->b_p_initialized = false;
@@ -1840,6 +1856,8 @@ buf_T * buflist_new(char_u *ffname, char_u *sfname, linenr_T lnum, int flags)
   buf->b_p_bl = (flags & BLN_LISTED) ? true : false;    // init 'buflisted'
   kv_destroy(buf->update_channels);
   kv_init(buf->update_channels);
+  kv_destroy(buf->update_callbacks);
+  kv_init(buf->update_callbacks);
   if (!(flags & BLN_DUMMY)) {
     // Tricky: these autocommands may change the buffer list.  They could also
     // split the window with re-using the one empty buffer. This may result in
@@ -1862,6 +1880,18 @@ buf_T * buflist_new(char_u *ffname, char_u *sfname, linenr_T lnum, int flags)
   }
 
   return buf;
+}
+
+/// Return true if the current buffer is empty, unnamed, unmodified and used in
+/// only one window. That means it can be reused.
+bool curbuf_reusable(void)
+{
+  return (curbuf != NULL
+          && curbuf->b_ffname == NULL
+          && curbuf->b_nwindows <= 1
+          && (curbuf->b_ml.ml_mfp == NULL || BUFEMPTY())
+          && !bt_quickfix(curbuf)
+          && !curbufIsChanged());
 }
 
 /*
@@ -2522,6 +2552,11 @@ void get_winopts(buf_T *buf)
   } else
     copy_winopt(&curwin->w_allbuf_opt, &curwin->w_onebuf_opt);
 
+  if (curwin->w_float_config.style == kWinStyleMinimal) {
+    didset_window_options(curwin);
+    win_set_minimal_style(curwin);
+  }
+
   // Set 'foldlevel' to 'foldlevelstart' if it's not negative.
   if (p_fdls >= 0) {
     curwin->w_p_fdl = p_fdls;
@@ -2585,14 +2620,23 @@ void buflist_list(exarg_T *eap)
       continue;
     }
 
+    const int changed_char = (buf->b_flags & BF_READERR)
+      ? 'x'
+      : (bufIsChanged(buf) ? '+' : ' ');
+    int ro_char = !MODIFIABLE(buf) ? '-' : (buf->b_p_ro ? '=' : ' ');
+    if (buf->terminal) {
+      ro_char = channel_job_running((uint64_t)buf->b_p_channel) ? 'R' : 'F';
+    }
+
     msg_putchar('\n');
-    len = vim_snprintf((char *)IObuff, IOSIZE - 20, "%3d%c%c%c%c%c \"%s\"",
+    len = vim_snprintf(
+        (char *)IObuff, IOSIZE - 20, "%3d%c%c%c%c%c \"%s\"",
         buf->b_fnum,
         buf->b_p_bl ? ' ' : 'u',
         buf == curbuf ? '%' : (curwin->w_alt_fnum == buf->b_fnum ? '#' : ' '),
         buf->b_ml.ml_mfp == NULL ? ' ' : (buf->b_nwindows == 0 ? 'h' : 'a'),
-        !MODIFIABLE(buf) ? '-' : (buf->b_p_ro ? '=' : ' '),
-        (buf->b_flags & BF_READERR) ? 'x' : (bufIsChanged(buf) ? '+' : ' '),
+        ro_char,
+        changed_char,
         NameBuff);
 
     if (len > IOSIZE - 20) {
@@ -2609,8 +2653,7 @@ void buflist_list(exarg_T *eap)
         buf == curbuf ? (int64_t)curwin->w_cursor.lnum
                       : (int64_t)buflist_findlnum(buf));
     msg_outtrans(IObuff);
-    ui_flush();            // output one line at a time
-    os_breakcheck();
+    line_breakcheck();
   }
 }
 
@@ -2655,10 +2698,8 @@ setfname(
 
   if (ffname == NULL || *ffname == NUL) {
     // Removing the name.
-    xfree(buf->b_ffname);
-    xfree(buf->b_sfname);
-    buf->b_ffname = NULL;
-    buf->b_sfname = NULL;
+    XFREE_CLEAR(buf->b_ffname);
+    XFREE_CLEAR(buf->b_sfname);
   } else {
     fname_expand(buf, &ffname, &sfname);    // will allocate ffname
     if (ffname == NULL) {                   // out of memory
@@ -3333,7 +3374,6 @@ int build_stl_str_hl(
   char_u      *usefmt = fmt;
   const int save_must_redraw = must_redraw;
   const int save_redr_type = curwin->w_redr_type;
-  const int save_highlight_shcnaged = need_highlight_changed;
 
   // When the format starts with "%!" then evaluate it as an expression and
   // use the result as the actual format string.
@@ -3470,15 +3510,26 @@ int build_stl_str_hl(
       //       Otherwise there would be no reason to do this step.
       if (curitem > groupitems[groupdepth] + 1
           && items[groupitems[groupdepth]].minwid == 0) {
-        bool has_normal_items = false;
-        for (long n = groupitems[groupdepth] + 1; n < curitem; n++) {
-          if (items[n].type == Normal || items[n].type == Highlight) {
-            has_normal_items = true;
+        // remove group if all items are empty and highlight group
+        // doesn't change
+        int group_start_userhl = 0;
+        int group_end_userhl = 0;
+        int n;
+        for (n = groupitems[groupdepth] - 1; n >= 0; n--) {
+          if (items[n].type == Highlight) {
+            group_start_userhl = group_end_userhl = items[n].minwid;
             break;
           }
         }
-
-        if (!has_normal_items) {
+        for (n = groupitems[groupdepth] + 1; n < curitem; n++) {
+          if (items[n].type == Normal) {
+            break;
+          }
+          if (items[n].type == Highlight) {
+            group_end_userhl = items[n].minwid;
+          }
+        }
+        if (n == curitem && group_start_userhl == group_end_userhl) {
           out_p = t;
           group_len = 0;
         }
@@ -3576,10 +3627,7 @@ int build_stl_str_hl(
 
     // The first digit group is the item's min width
     if (ascii_isdigit(*fmt_p)) {
-      minwid = getdigits_int(&fmt_p);
-      if (minwid < 0) {         // overflow
-        minwid = 0;
-      }
+      minwid = getdigits_int(&fmt_p, false, 0);
     }
 
     // User highlight groups override the min width field
@@ -3662,10 +3710,7 @@ int build_stl_str_hl(
     if (*fmt_p == '.') {
       fmt_p++;
       if (ascii_isdigit(*fmt_p)) {
-        maxwid = getdigits_int(&fmt_p);
-        if (maxwid <= 0) {              // overflow
-          maxwid = 50;
-        }
+        maxwid = getdigits_int(&fmt_p, false, 50);
       }
     }
 
@@ -3770,8 +3815,7 @@ int build_stl_str_hl(
       if (str != NULL && *str != 0) {
         if (*skipdigits(str) == NUL) {
           num = atoi((char *)str);
-          xfree(str);
-          str = NULL;
+          XFREE_CLEAR(str);
           itemisflag = false;
         }
       }
@@ -4387,12 +4431,12 @@ int build_stl_str_hl(
     cur_tab_rec->def.func = NULL;
   }
 
-  // We do not want redrawing a stausline, ruler, title, etc. to trigger
-  // another redraw, it may cause an endless loop.  This happens when a
-  // statusline changes a highlight group.
-  must_redraw = save_must_redraw;
-  curwin->w_redr_type = save_redr_type;
-  need_highlight_changed = save_highlight_shcnaged;
+  // When inside update_screen we do not want redrawing a stausline, ruler,
+  // title, etc. to trigger another redraw, it may cause an endless loop.
+  if (updating_screen) {
+    must_redraw = save_must_redraw;
+    curwin->w_redr_type = save_redr_type;
+  }
 
   return width;
 }
@@ -4478,7 +4522,7 @@ void fname_expand(buf_T *buf, char_u **ffname, char_u **sfname)
   if (*sfname == NULL) {        // if no short file name given, use ffname
     *sfname = *ffname;
   }
-  *ffname = (char_u *)fix_fname((char *)*ffname);     // expand to full path
+  *ffname = (char_u *)fix_fname((char *)(*ffname));     // expand to full path
 
 #ifdef WIN32
   if (!buf->b_p_bin) {
@@ -5015,7 +5059,6 @@ chk_modeline(
   int retval = OK;
   char_u      *save_sourcing_name;
   linenr_T save_sourcing_lnum;
-  scid_T save_SID;
 
   prev = -1;
   for (s = ml_get(lnum); *s != NUL; s++) {
@@ -5030,7 +5073,7 @@ chk_modeline(
         } else {
           e = s + 3;
         }
-        if (getdigits_safe(&e, &vers) != OK) {
+        if (!try_getdigits(&e, &vers)) {
           continue;
         }
 
@@ -5102,15 +5145,18 @@ chk_modeline(
     *e = NUL;                         // truncate the set command
 
     if (*s != NUL) {                  // skip over an empty "::"
-      save_SID = current_SID;
-      current_SID = SID_MODELINE;
+      const int secure_save = secure;
+      const sctx_T save_current_sctx = current_sctx;
+      current_sctx.sc_sid = SID_MODELINE;
+      current_sctx.sc_seq = 0;
+      current_sctx.sc_lnum = 0;
       // Make sure no risky things are executed as a side effect.
-      secure++;
+      secure = 1;
 
       retval = do_set(s, OPT_MODELINE | OPT_LOCAL | flags);
 
-      secure--;
-      current_SID = save_SID;
+      secure = secure_save;
+      current_sctx = save_current_sctx;
       if (retval == FAIL) {                   // stop if error found
         break;
       }
@@ -5128,8 +5174,63 @@ chk_modeline(
 
 // Return true if "buf" is a help buffer.
 bool bt_help(const buf_T *const buf)
+  FUNC_ATTR_PURE FUNC_ATTR_WARN_UNUSED_RESULT
 {
   return buf != NULL && buf->b_help;
+}
+
+// Return true if "buf" is the quickfix buffer.
+bool bt_quickfix(const buf_T *const buf)
+  FUNC_ATTR_PURE FUNC_ATTR_WARN_UNUSED_RESULT
+{
+  return buf != NULL && buf->b_p_bt[0] == 'q';
+}
+
+// Return true if "buf" is a terminal buffer.
+bool bt_terminal(const buf_T *const buf)
+  FUNC_ATTR_PURE FUNC_ATTR_WARN_UNUSED_RESULT
+{
+  return buf != NULL && buf->b_p_bt[0] == 't';
+}
+
+// Return true if "buf" is a "nofile", "acwrite" or "terminal" buffer.
+// This means the buffer name is not a file name.
+bool bt_nofile(const buf_T *const buf)
+  FUNC_ATTR_PURE FUNC_ATTR_WARN_UNUSED_RESULT
+{
+  return buf != NULL && ((buf->b_p_bt[0] == 'n' && buf->b_p_bt[2] == 'f')
+                         || buf->b_p_bt[0] == 'a' || buf->terminal);
+}
+
+// Return true if "buf" is a "nowrite", "nofile" or "terminal" buffer.
+bool bt_dontwrite(const buf_T *const buf)
+  FUNC_ATTR_PURE FUNC_ATTR_WARN_UNUSED_RESULT
+{
+  return buf != NULL && (buf->b_p_bt[0] == 'n' || buf->terminal);
+}
+
+bool bt_dontwrite_msg(const buf_T *const buf)
+  FUNC_ATTR_PURE FUNC_ATTR_WARN_UNUSED_RESULT
+{
+  if (bt_dontwrite(buf)) {
+    EMSG(_("E382: Cannot write, 'buftype' option is set"));
+    return true;
+  }
+  return false;
+}
+
+// Return true if the buffer should be hidden, according to 'hidden', ":hide"
+// and 'bufhidden'.
+bool buf_hide(const buf_T *const buf)
+{
+  // 'bufhidden' overrules 'hidden' and ":hide", check it first
+  switch (buf->b_p_bh[0]) {
+  case 'u':                         // "unload"
+  case 'w':                         // "wipe"
+  case 'd': return false;           // "delete"
+  case 'h': return true;            // "hide"
+  }
+  return p_hid || cmdmod.hide;
 }
 
 /*
@@ -5152,11 +5253,11 @@ char_u *buf_spname(buf_T *buf)
       return (char_u *)_(msg_qflist);
     }
   }
-  /* There is no _file_ when 'buftype' is "nofile", b_sfname
-   * contains the name as specified by the user */
+  // There is no _file_ when 'buftype' is "nofile", b_sfname
+  // contains the name as specified by the user.
   if (bt_nofile(buf)) {
-    if (buf->b_sfname != NULL) {
-      return buf->b_sfname;
+    if (buf->b_fname != NULL) {
+      return buf->b_fname;
     }
     return (char_u *)_("[Scratch]");
   }
@@ -5190,124 +5291,27 @@ bool find_win_for_buf(buf_T *buf, win_T **wp, tabpage_T **tp)
   return false;
 }
 
-/*
- * Insert the sign into the signlist.
- */
-static void insert_sign(
-    buf_T *buf,             // buffer to store sign in
-    signlist_T *prev,       // previous sign entry
-    signlist_T *next,       // next sign entry
-    int id,                 // sign ID
-    linenr_T lnum,          // line number which gets the mark
-    int typenr              // typenr of sign we are adding
-)
-{
-    signlist_T *newsign = xmalloc(sizeof(signlist_T));
-    newsign->id = id;
-    newsign->lnum = lnum;
-    newsign->typenr = typenr;
-    newsign->next = next;
-    newsign->prev = prev;
-    if (next != NULL) {
-      next->prev = newsign;
-    }
-    buf->b_signcols_max = -1;
-
-    if (prev == NULL) {
-        /* When adding first sign need to redraw the windows to create the
-         * column for signs. */
-        if (buf->b_signlist == NULL) {
-            redraw_buf_later(buf, NOT_VALID);
-            changed_cline_bef_curs();
-        }
-
-        // first sign in signlist
-        buf->b_signlist = newsign;
-    }
-    else {
-        prev->next = newsign;
-    }
-}
-
-static int sign_compare(const void *a1, const void *a2)
-{
-    const signlist_T *s1 = *(const signlist_T **)a1;
-    const signlist_T *s2 = *(const signlist_T **)a2;
-
-    // Sort by line number and the by id
-
-    if (s1->lnum > s2->lnum) {
-        return 1;
-    }
-    if (s1->lnum < s2->lnum) {
-        return -1;
-    }
-    if (s1->id > s2->id) {
-        return 1;
-    }
-    if (s1->id < s2->id) {
-        return -1;
-    }
-
-    return 0;
-}
-
 int buf_signcols(buf_T *buf)
 {
     if (buf->b_signcols_max == -1) {
         signlist_T *sign;  // a sign in the signlist
-        signlist_T **signs_array;
-        signlist_T **prev_sign;
-        int nr_signs = 0, i = 0, same;
-
-        // Count the number of signs
-        for (sign = buf->b_signlist; sign != NULL; sign = sign->next) {
-            nr_signs++;
-        }
-
-        // Make an array of all the signs
-        signs_array = xcalloc((size_t)nr_signs, sizeof(*sign));
-        for (sign = buf->b_signlist; sign != NULL; sign = sign->next) {
-            signs_array[i] = sign;
-            i++;
-        }
-
-        // Sort the array
-        qsort(signs_array, (size_t)nr_signs, sizeof(signlist_T *),
-              sign_compare);
-
-        // Find the maximum amount of signs existing in a single line
         buf->b_signcols_max = 0;
+        int linesum = 0;
+        linenr_T curline = 0;
 
-        same = 1;
-        for (i = 1; i < nr_signs; i++) {
-            if (signs_array[i - 1]->lnum != signs_array[i]->lnum) {
-                if (buf->b_signcols_max < same) {
-                    buf->b_signcols_max = same;
-                }
-                same = 1;
-            } else {
-                same++;
+        FOR_ALL_SIGNS_IN_BUF(buf, sign) {
+          if (sign->lnum > curline) {
+            if (linesum > buf->b_signcols_max) {
+              buf->b_signcols_max = linesum;
             }
+            curline = sign->lnum;
+            linesum = 0;
+          }
+          linesum++;
         }
-
-        if (nr_signs > 0 && buf->b_signcols_max < same) {
-            buf->b_signcols_max = same;
+        if (linesum > buf->b_signcols_max) {
+          buf->b_signcols_max = linesum;
         }
-
-        // Recreate the linked list with the sorted order of the array
-        buf->b_signlist = NULL;
-        prev_sign = &buf->b_signlist;
-
-        for (i = 0; i < nr_signs; i++) {
-            sign = signs_array[i];
-            sign->next = NULL;
-            *prev_sign = sign;
-
-            prev_sign = &sign->next;
-        }
-
-        xfree(signs_array);
 
         // Check if we need to redraw
         if (buf->b_signcols_max != buf->b_signcols) {
@@ -5317,314 +5321,6 @@ int buf_signcols(buf_T *buf)
     }
 
     return buf->b_signcols;
-}
-
-/*
- * Add the sign into the signlist. Find the right spot to do it though.
- */
-void buf_addsign(
-    buf_T *buf,     // buffer to store sign in
-    int id,         // sign ID
-    linenr_T lnum,  // line number which gets the mark
-    int typenr      // typenr of sign we are adding
-)
-{
-    signlist_T **lastp;  // pointer to pointer to current sign
-    signlist_T *sign;    // a sign in the signlist
-    signlist_T *prev;    // the previous sign
-
-    prev = NULL;
-    for (sign = buf->b_signlist; sign != NULL; sign = sign->next) {
-        if (lnum == sign->lnum && id == sign->id) {
-            sign->typenr = typenr;
-            return;
-        } else if ((lnum == sign->lnum && id != sign->id)
-                   || (id < 0 && lnum < sign->lnum)) {
-          // keep signs sorted by lnum: insert new sign at head of list for
-          // this lnum
-          while (prev != NULL && prev->lnum == lnum) {
-            prev = prev->prev;
-          }
-          if (prev == NULL) {
-            sign = buf->b_signlist;
-          } else {
-            sign = prev->next;
-          }
-          insert_sign(buf, prev, sign, id, lnum, typenr);
-          return;
-        }
-        prev = sign;
-    }
-
-    // insert new sign at head of list for this lnum
-    while (prev != NULL && prev->lnum == lnum) {
-      prev = prev->prev;
-    }
-    if (prev == NULL) {
-      sign = buf->b_signlist;
-    } else {
-      sign = prev->next;
-    }
-    insert_sign(buf, prev, sign, id, lnum, typenr);
-
-    // Having more than one sign with _the same type_ and on the _same line_ is
-    // unwanted, let's prevent it.
-
-    lastp = &buf->b_signlist;
-    for (sign = buf->b_signlist; sign != NULL; sign = sign->next) {
-        if (lnum == sign->lnum && sign->typenr == typenr && id != sign->id) {
-            *lastp = sign->next;
-            xfree(sign);
-        } else {
-            lastp = &sign->next;
-        }
-    }
-}
-
-// For an existing, placed sign "markId" change the type to "typenr".
-// Returns the line number of the sign, or zero if the sign is not found.
-linenr_T buf_change_sign_type(
-    buf_T *buf,         // buffer to store sign in
-    int markId,         // sign ID
-    int typenr          // typenr of sign we are adding
-)
-{
-    signlist_T *sign;  // a sign in the signlist
-
-    for (sign = buf->b_signlist; sign != NULL; sign = sign->next) {
-        if (sign->id == markId) {
-            sign->typenr = typenr;
-            return sign->lnum;
-        }
-    }
-
-    return (linenr_T)0;
-}
-
-
-/// Gets a sign from a given line.
-///
-/// @param buf Buffer in which to search
-/// @param lnum Line in which to search
-/// @param type Type of sign to look for
-/// @param idx if there multiple signs, this index will pick the n-th
-//          out of the most `max_signs` sorted ascending by Id.
-/// @param max_signs the number of signs, with priority for the ones
-//         with the highest Ids.
-/// @return Identifier of the matching sign, or 0
-int buf_getsigntype(buf_T *buf, linenr_T lnum, SignType type,
-                    int idx, int max_signs)
-{
-    signlist_T *sign;  // a sign in a b_signlist
-    signlist_T *matches[9];
-    int nr_matches = 0;
-
-    for (sign = buf->b_signlist; sign != NULL; sign = sign->next) {
-        if (sign->lnum == lnum
-                && (type == SIGN_ANY
-                    || (type == SIGN_TEXT
-                        && sign_get_text(sign->typenr) != NULL)
-                    || (type == SIGN_LINEHL
-                        && sign_get_attr(sign->typenr, SIGN_LINEHL) != 0)
-                    || (type == SIGN_NUMHL
-                        && sign_get_attr(sign->typenr, SIGN_NUMHL) != 0))) {
-            matches[nr_matches] = sign;
-            nr_matches++;
-
-            if (nr_matches == ARRAY_SIZE(matches)) {
-                break;
-            }
-        }
-    }
-
-    if (nr_matches > 0) {
-        if (nr_matches > max_signs) {
-            idx += nr_matches - max_signs;
-        }
-
-        if (idx >= nr_matches) {
-            return 0;
-        }
-
-        return matches[idx]->typenr;
-    }
-
-    return 0;
-}
-
-linenr_T buf_delsign(
-    buf_T *buf,  // buffer sign is stored in
-    int id       // sign id
-)
-{
-    signlist_T **lastp;  // pointer to pointer to current sign
-    signlist_T *sign;    // a sign in a b_signlist
-    signlist_T *next;    // the next sign in a b_signlist
-    linenr_T lnum;       // line number whose sign was deleted
-
-    buf->b_signcols_max = -1;
-    lastp = &buf->b_signlist;
-    lnum = 0;
-    for (sign = buf->b_signlist; sign != NULL; sign = next) {
-        next = sign->next;
-        if (sign->id == id) {
-            *lastp = next;
-            if (next != NULL) {
-              next->prev = sign->prev;
-            }
-            lnum = sign->lnum;
-            xfree(sign);
-            break;
-        } else {
-            lastp = &sign->next;
-        }
-    }
-
-    /* When deleted the last sign needs to redraw the windows to remove the
-     * sign column. */
-    if (buf->b_signlist == NULL) {
-        redraw_buf_later(buf, NOT_VALID);
-        changed_cline_bef_curs();
-    }
-
-    return lnum;
-}
-
-
-/*
- * Find the line number of the sign with the requested id. If the sign does
- * not exist, return 0 as the line number. This will still let the correct file
- * get loaded.
- */
-int buf_findsign(
-    buf_T *buf,     // buffer to store sign in
-    int id          // sign ID
-)
-{
-    signlist_T *sign;  // a sign in the signlist
-
-    for (sign = buf->b_signlist; sign != NULL; sign = sign->next) {
-        if (sign->id == id) {
-            return (int)sign->lnum;
-        }
-    }
-
-    return 0;
-}
-
-int buf_findsign_id(
-    buf_T *buf,         // buffer whose sign we are searching for
-    linenr_T lnum       // line number of sign
-)
-{
-    signlist_T *sign;   // a sign in the signlist
-
-    for (sign = buf->b_signlist; sign != NULL; sign = sign->next) {
-        if (sign->lnum == lnum) {
-            return sign->id;
-        }
-    }
-
-    return 0;
-}
-
-
-/*
- * Delete signs in buffer "buf".
- */
-void buf_delete_signs(buf_T *buf)
-{
-    signlist_T *next;
-
-    // When deleting the last sign need to redraw the windows to remove the
-    // sign column. Not when curwin is NULL (this means we're exiting).
-    if (buf->b_signlist != NULL && curwin != NULL){
-      redraw_buf_later(buf, NOT_VALID);
-      changed_cline_bef_curs();
-    }
-
-    while (buf->b_signlist != NULL) {
-        next = buf->b_signlist->next;
-        xfree(buf->b_signlist);
-        buf->b_signlist = next;
-    }
-    buf->b_signcols_max = -1;
-}
-
-/*
- * Delete all signs in all buffers.
- */
-void buf_delete_all_signs(void)
-{
-  FOR_ALL_BUFFERS(buf) {
-    if (buf->b_signlist != NULL) {
-      buf_delete_signs(buf);
-    }
-  }
-}
-
-/*
- * List placed signs for "rbuf".  If "rbuf" is NULL do it for all buffers.
- */
-void sign_list_placed(buf_T *rbuf)
-{
-    buf_T *buf;
-    signlist_T *p;
-    char lbuf[BUFSIZ];
-
-    MSG_PUTS_TITLE(_("\n--- Signs ---"));
-    msg_putchar('\n');
-    if (rbuf == NULL) {
-        buf = firstbuf;
-    } else {
-        buf = rbuf;
-    }
-    while (buf != NULL && !got_int) {
-        if (buf->b_signlist != NULL) {
-            vim_snprintf(lbuf, BUFSIZ, _("Signs for %s:"), buf->b_fname);
-            MSG_PUTS_ATTR(lbuf, HL_ATTR(HLF_D));
-            msg_putchar('\n');
-        }
-        for (p = buf->b_signlist; p != NULL && !got_int; p = p->next) {
-            vim_snprintf(lbuf, BUFSIZ, _("    line=%" PRId64 "  id=%d  name=%s"),
-                    (int64_t)p->lnum, p->id, sign_typenr2name(p->typenr));
-            MSG_PUTS(lbuf);
-            msg_putchar('\n');
-        }
-        if (rbuf != NULL) {
-            break;
-        }
-        buf = buf->b_next;
-    }
-}
-
-/*
- * Adjust a placed sign for inserted/deleted lines.
- */
-void sign_mark_adjust(linenr_T line1, linenr_T line2, long amount, long amount_after)
-{
-    signlist_T *sign;    // a sign in a b_signlist
-    signlist_T *next;    // the next sign in a b_signlist
-    signlist_T **lastp;  // pointer to pointer to current sign
-
-    curbuf->b_signcols_max = -1;
-    lastp = &curbuf->b_signlist;
-
-    for (sign = curbuf->b_signlist; sign != NULL; sign = next) {
-        next = sign->next;
-        if (sign->lnum >= line1 && sign->lnum <= line2) {
-            if (amount == MAXLNUM) {
-                *lastp = next;
-                xfree(sign);
-                continue;
-            } else {
-                sign->lnum += amount;
-            }
-        } else if (sign->lnum > line2) {
-            sign->lnum += amount_after;
-        }
-        lastp = &sign->next;
-    }
 }
 
 // bufhl: plugin highlights associated with a buffer

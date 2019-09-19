@@ -36,7 +36,6 @@ import shutil
 import textwrap
 import subprocess
 import collections
-import pprint
 
 from xml.dom import minidom
 
@@ -48,25 +47,65 @@ DEBUG = ('DEBUG' in os.environ)
 INCLUDE_C_DECL = ('INCLUDE_C_DECL' in os.environ)
 INCLUDE_DEPRECATED = ('INCLUDE_DEPRECATED' in os.environ)
 
-doc_filename = 'api.txt'
-# String used to find the start of the generated part of the doc.
-section_start_token = '*api-global*'
-# Required prefix for API function names.
-api_func_name_prefix = 'nvim_'
+text_width = 78
+script_path = os.path.abspath(__file__)
+base_dir = os.path.dirname(os.path.dirname(script_path))
+out_dir = os.path.join(base_dir, 'tmp-{mode}-doc')
+filter_cmd = '%s %s' % (sys.executable, script_path)
+seen_funcs = set()
+lua2dox_filter = os.path.join(base_dir, 'scripts', 'lua2dox_filter')
 
-# Section name overrides.
-section_name = {
-    'vim.c': 'Global',
+CONFIG = {
+    'api': {
+        'filename': 'api.txt',
+        # String used to find the start of the generated part of the doc.
+        'section_start_token': '*api-global*',
+        # Section ordering.
+        'section_order': [
+            'vim.c',
+            'buffer.c',
+            'window.c',
+            'tabpage.c',
+            'ui.c',
+        ],
+        # List of files/directories for doxygen to read, separated by blanks
+        'files': os.path.join(base_dir, 'src/nvim/api'),
+        # file patterns used by doxygen
+        'file_patterns': '*.h *.c',
+        # Only function with this prefix are considered
+        'func_name_prefix': 'nvim_',
+        # Section name overrides.
+        'section_name': {
+            'vim.c': 'Global',
+        },
+        # Module name overrides (for Lua).
+        'module_override': {},
+        # Append the docs for these modules, do not start a new section.
+        'append_only': [],
+    },
+    'lua': {
+        'filename': 'if_lua.txt',
+        'section_start_token': '*lua-vim*',
+        'section_order': [
+            'vim.lua',
+            'shared.lua',
+        ],
+        'files': ' '.join([
+            os.path.join(base_dir, 'src/nvim/lua/vim.lua'),
+            os.path.join(base_dir, 'runtime/lua/vim/shared.lua'),
+        ]),
+        'file_patterns': '*.lua',
+        'func_name_prefix': '',
+        'section_name': {},
+        'module_override': {
+            # `shared` functions are exposed on the `vim` module.
+            'shared': 'vim',
+        },
+        'append_only': [
+            'shared.lua',
+        ],
+    },
 }
-
-# Section ordering.
-section_order = (
-    'vim.c',
-    'buffer.c',
-    'window.c',
-    'tabpage.c',
-    'ui.c',
-)
 
 param_exclude = (
     'channel_id',
@@ -74,20 +113,14 @@ param_exclude = (
 
 # Annotations are displayed as line items after API function descriptions.
 annotation_map = {
-    'FUNC_API_ASYNC': '{async}',
+    'FUNC_API_FAST': '{fast}',
 }
 
-text_width = 78
-script_path = os.path.abspath(__file__)
-base_dir = os.path.dirname(os.path.dirname(script_path))
-src_dir = os.path.join(base_dir, 'src/nvim/api')
-out_dir = os.path.join(base_dir, 'tmp-api-doc')
-filter_cmd = '%s %s' % (sys.executable, script_path)
-seen_funcs = set()
 
 # Tracks `xrefsect` titles.  As of this writing, used only for separating
 # deprecated functions.
 xrefs = set()
+
 
 def debug_this(s, n):
     o = n if isinstance(n, str) else n.toprettyxml(indent='  ', newl='\n')
@@ -139,7 +172,7 @@ def is_blank(text):
     return '' == clean_lines(text)
 
 
-def get_text(parent):
+def get_text(parent, preformatted=False):
     """Combine all text in a node."""
     if parent.nodeType == parent.TEXT_NODE:
         return parent.data
@@ -147,9 +180,9 @@ def get_text(parent):
     out = ''
     for node in parent.childNodes:
         if node.nodeType == node.TEXT_NODE:
-            out += clean_text(node.data)
+            out += node.data if preformatted else clean_text(node.data)
         elif node.nodeType == node.ELEMENT_NODE:
-            out += ' ' + get_text(node)
+            out += ' ' + get_text(node, preformatted)
     return out
 
 
@@ -159,7 +192,7 @@ def len_lastline(text):
     if -1 == lastnl:
         return len(text)
     if '\n' == text[-1]:
-        return lastnl - (1+ text.rfind('\n', 0, lastnl))
+        return lastnl - (1 + text.rfind('\n', 0, lastnl))
     return len(text) - (1 + lastnl)
 
 
@@ -176,6 +209,7 @@ def is_inline(n):
         if not is_inline(c):
             return False
     return True
+
 
 def doc_wrap(text, prefix='', width=70, func=False, indent=None):
     """Wraps text to `width`.
@@ -205,8 +239,8 @@ def doc_wrap(text, prefix='', width=70, func=False, indent=None):
     if indent_only:
         prefix = indent
 
-    tw = textwrap.TextWrapper(break_long_words = False,
-                              break_on_hyphens = False,
+    tw = textwrap.TextWrapper(break_long_words=False,
+                              break_on_hyphens=False,
                               width=width,
                               initial_indent=prefix,
                               subsequent_indent=indent)
@@ -217,6 +251,14 @@ def doc_wrap(text, prefix='', width=70, func=False, indent=None):
         result = result[len(indent):]
 
     return result
+
+
+def has_nonexcluded_params(nodes):
+    """Returns true if any of the given <parameterlist> elements has at least
+    one non-excluded item."""
+    for n in nodes:
+        if render_params(n) != '':
+            return True
 
 
 def render_params(parent, width=62):
@@ -247,13 +289,14 @@ def render_params(parent, width=62):
         desc_node = get_child(node, 'parameterdescription')
         if desc_node:
             desc = parse_parblock(desc_node, width=width,
-                    indent=(' ' * len(name)))
+                                  indent=(' ' * len(name)))
 
         out += '{}{}\n'.format(name, desc)
     return out.rstrip()
 
-# Renders a node as Vim help text, recursively traversing all descendants.
+
 def render_node(n, text, prefix='', indent='', width=62):
+    """Renders a node as Vim help text, recursively traversing all descendants."""
     text = ''
     # space_preceding = (len(text) > 0 and ' ' == text[-1][-1])
     # text += (int(not space_preceding) * ' ')
@@ -263,6 +306,10 @@ def render_node(n, text, prefix='', indent='', width=62):
         text += doc_wrap(n.data, indent=indent, width=width)
     elif n.nodeName == 'computeroutput':
         text += ' `{}` '.format(get_text(n))
+    elif n.nodeName == 'preformatted':
+        o = get_text(n, preformatted=True)
+        ensure_nl = '' if o[-1] == '\n' else '\n'
+        text += ' >{}{}\n<'.format(ensure_nl, o)
     elif is_inline(n):
         for c in n.childNodes:
             text += render_node(c, text)
@@ -273,16 +320,20 @@ def render_node(n, text, prefix='', indent='', width=62):
         text += ' [verbatim] {}'.format(get_text(n))
     elif n.nodeName == 'listitem':
         for c in n.childNodes:
-            text += indent + prefix + render_node(c, text, indent=indent+(' ' * len(prefix)), width=width)
-    elif n.nodeName == 'para':
+            text += (
+                indent
+                + prefix
+                + render_node(c, text, indent=indent + (' ' * len(prefix)), width=width)
+            )
+    elif n.nodeName in ('para', 'heading'):
         for c in n.childNodes:
             text += render_node(c, text, indent=indent, width=width)
         if is_inline(n):
             text = doc_wrap(text, indent=indent, width=width)
     elif n.nodeName == 'itemizedlist':
         for c in n.childNodes:
-            text += '{}\n'.format(render_node(c, text, prefix='- ',
-                indent=indent, width=width))
+            text += '{}\n'.format(render_node(c, text, prefix='• ',
+                                              indent=indent, width=width))
     elif n.nodeName == 'orderedlist':
         i = 1
         for c in n.childNodes:
@@ -290,7 +341,7 @@ def render_node(n, text, prefix='', indent='', width=62):
                 text += '\n'
                 continue
             text += '{}\n'.format(render_node(c, text, prefix='{}. '.format(i),
-                indent=indent, width=width))
+                                              indent=indent, width=width))
             i = i + 1
     elif n.nodeName == 'simplesect' and 'note' == n.getAttribute('kind'):
         text += 'Note:\n    '
@@ -312,6 +363,7 @@ def render_node(n, text, prefix='', indent='', width=62):
             n.nodeName, n.toprettyxml(indent='  ', newl='\n')))
     return text
 
+
 def render_para(parent, indent='', width=62):
     """Renders Doxygen <para> containing arbitrary nodes.
 
@@ -319,7 +371,7 @@ def render_para(parent, indent='', width=62):
     """
     if is_inline(parent):
         return clean_lines(doc_wrap(render_node(parent, ''),
-            indent=indent, width=width).strip())
+                                    indent=indent, width=width).strip())
 
     # Ordered dict of ordered lists.
     groups = collections.OrderedDict([
@@ -356,24 +408,26 @@ def render_para(parent, indent='', width=62):
 
     chunks = [text]
     # Generate text from the gathered items.
-    if len(groups['params']) > 0:
+    if len(groups['params']) > 0 and has_nonexcluded_params(groups['params']):
         chunks.append('\nParameters: ~')
         for child in groups['params']:
             chunks.append(render_params(child, width=width))
     if len(groups['return']) > 0:
         chunks.append('\nReturn: ~')
         for child in groups['return']:
-            chunks.append(render_node(child, chunks[-1][-1], indent=indent, width=width))
+            chunks.append(render_node(
+                child, chunks[-1][-1], indent=indent, width=width))
     if len(groups['seealso']) > 0:
         chunks.append('\nSee also: ~')
         for child in groups['seealso']:
-            chunks.append(render_node(child, chunks[-1][-1], indent=indent, width=width))
+            chunks.append(render_node(
+                child, chunks[-1][-1], indent=indent, width=width))
     for child in groups['xrefs']:
         title = get_text(get_child(child, 'xreftitle'))
         xrefs.add(title)
         xrefdesc = render_para(get_child(child, 'xrefdescription'), width=width)
         chunks.append(doc_wrap(xrefdesc, prefix='{}: '.format(title),
-                              width=width) + '\n')
+                               width=width) + '\n')
 
     return clean_lines('\n'.join(chunks).strip())
 
@@ -388,7 +442,7 @@ def parse_parblock(parent, prefix='', width=62, indent=''):
 # }}}
 
 
-def parse_source_xml(filename):
+def parse_source_xml(filename, mode):
     """Collects API functions.
 
     Returns two strings:
@@ -403,9 +457,12 @@ def parse_source_xml(filename):
     deprecated_functions = []
 
     dom = minidom.parse(filename)
+    compoundname = get_text(dom.getElementsByTagName('compoundname')[0])
     for member in dom.getElementsByTagName('memberdef'):
         if member.getAttribute('static') == 'yes' or \
-                member.getAttribute('kind') != 'function':
+                member.getAttribute('kind') != 'function' or \
+                member.getAttribute('prot') == 'private' or \
+                get_text(get_child(member, 'name')).startswith('_'):
             continue
 
         loc = find_first(member, 'location')
@@ -428,11 +485,17 @@ def parse_source_xml(filename):
         # XXX: (doxygen 1.8.11) 'argsstring' only includes attributes of
         # non-void functions.  Special-case void functions here.
         if name == 'nvim_get_mode' and len(annotations) == 0:
-            annotations += 'FUNC_API_ASYNC'
+            annotations += 'FUNC_API_FAST'
         annotations = filter(None, map(lambda x: annotation_map.get(x),
                                        annotations.split()))
 
-        vimtag = '*{}()*'.format(name)
+        if mode == 'lua':
+            fstem = compoundname.split('.')[0]
+            fstem = CONFIG[mode]['module_override'].get(fstem, fstem)
+            vimtag = '*{}.{}()*'.format(fstem, name)
+        else:
+            vimtag = '*{}()*'.format(name)
+
         params = []
         type_length = 0
 
@@ -442,6 +505,10 @@ def parse_source_xml(filename):
             declname = get_child(param, 'declname')
             if declname:
                 param_name = get_text(declname).strip()
+            elif mode == 'lua':
+                # that's how it comes out of lua2dox
+                param_name = param_type
+                param_type = ''
 
             if param_name in param_exclude:
                 continue
@@ -509,7 +576,7 @@ def parse_source_xml(filename):
 
         if 'Deprecated' in xrefs:
             deprecated_functions.append(func_doc)
-        elif name.startswith(api_func_name_prefix):
+        elif name.startswith(CONFIG[mode]['func_name_prefix']):
             functions.append(func_doc)
 
         xrefs.clear()
@@ -530,120 +597,139 @@ def delete_lines_below(filename, tokenstr):
     with open(filename, 'wt') as fp:
         fp.writelines(lines[0:i])
 
+
 def gen_docs(config):
     """Generate documentation.
 
     Doxygen is called and configured through stdin.
     """
-    p = subprocess.Popen(['doxygen', '-'], stdin=subprocess.PIPE)
-    p.communicate(config.format(input=src_dir, output=out_dir,
-                                filter=filter_cmd).encode('utf8'))
-    if p.returncode:
-        sys.exit(p.returncode)
+    for mode in CONFIG:
+        output_dir = out_dir.format(mode=mode)
+        p = subprocess.Popen(['doxygen', '-'], stdin=subprocess.PIPE)
+        p.communicate(
+            config.format(
+                input=CONFIG[mode]['files'],
+                output=output_dir,
+                filter=filter_cmd,
+                file_patterns=CONFIG[mode]['file_patterns'])
+            .encode('utf8')
+        )
+        if p.returncode:
+            sys.exit(p.returncode)
 
-    sections = {}
-    intros = {}
-    sep = '=' * text_width
+        sections = {}
+        intros = {}
+        sep = '=' * text_width
 
-    base = os.path.join(out_dir, 'xml')
-    dom = minidom.parse(os.path.join(base, 'index.xml'))
+        base = os.path.join(output_dir, 'xml')
+        dom = minidom.parse(os.path.join(base, 'index.xml'))
 
-    # generate docs for section intros
-    for compound in dom.getElementsByTagName('compound'):
-        if compound.getAttribute('kind') != 'group':
-            continue
-
-        groupname = get_text(find_first(compound, 'name'))
-        groupxml = os.path.join(base, '%s.xml' % compound.getAttribute('refid'))
-
-        desc = find_first(minidom.parse(groupxml), 'detaileddescription')
-        if desc:
-            doc = parse_parblock(desc)
-            if doc:
-                intros[groupname] = doc
-
-    for compound in dom.getElementsByTagName('compound'):
-        if compound.getAttribute('kind') != 'file':
-            continue
-
-        filename = get_text(find_first(compound, 'name'))
-        if filename.endswith('.c'):
-            functions, deprecated = parse_source_xml(
-                os.path.join(base, '%s.xml' % compound.getAttribute('refid')))
-
-            if not functions and not deprecated:
+        # generate docs for section intros
+        for compound in dom.getElementsByTagName('compound'):
+            if compound.getAttribute('kind') != 'group':
                 continue
 
-            if functions or deprecated:
-                name = os.path.splitext(os.path.basename(filename))[0]
-                if name == 'ui':
-                    name = name.upper()
-                else:
-                    name = name.title()
+            groupname = get_text(find_first(compound, 'name'))
+            groupxml = os.path.join(base, '%s.xml' %
+                                    compound.getAttribute('refid'))
 
-                doc = ''
-
-                intro = intros.get('api-%s' % name.lower())
-                if intro:
-                    doc += '\n\n' + intro
-
-                if functions:
-                    doc += '\n\n' + functions
-
-                if INCLUDE_DEPRECATED and deprecated:
-                    doc += '\n\n\nDeprecated %s Functions: ~\n\n' % name
-                    doc += deprecated
-
+            desc = find_first(minidom.parse(groupxml), 'detaileddescription')
+            if desc:
+                doc = parse_parblock(desc)
                 if doc:
-                    filename = os.path.basename(filename)
-                    name = section_name.get(filename, name)
-                    title = '%s Functions' % name
-                    helptag = '*api-%s*' % name.lower()
-                    sections[filename] = (title, helptag, doc)
+                    intros[groupname] = doc
 
-    if not sections:
-        return
+        for compound in dom.getElementsByTagName('compound'):
+            if compound.getAttribute('kind') != 'file':
+                continue
 
-    docs = ''
+            filename = get_text(find_first(compound, 'name'))
+            if filename.endswith('.c') or filename.endswith('.lua'):
+                functions, deprecated = parse_source_xml(
+                    os.path.join(base, '%s.xml' %
+                                 compound.getAttribute('refid')), mode)
 
-    i = 0
-    for filename in section_order:
-        if filename not in sections:
-            continue
-        title, helptag, section_doc = sections.pop(filename)
+                if not functions and not deprecated:
+                    continue
 
-        i += 1
-        docs += sep
-        docs += '\n%s%s' % (title, helptag.rjust(text_width - len(title)))
-        docs += section_doc
-        docs += '\n\n\n'
+                if functions or deprecated:
+                    name = os.path.splitext(os.path.basename(filename))[0]
+                    if name == 'ui':
+                        name = name.upper()
+                    else:
+                        name = name.title()
 
-    if sections:
-        # In case new API sources are added without updating the order dict.
-        for title, helptag, section_doc in sections.values():
+                    doc = ''
+
+                    intro = intros.get('api-%s' % name.lower())
+                    if intro:
+                        doc += '\n\n' + intro
+
+                    if functions:
+                        doc += '\n\n' + functions
+
+                    if INCLUDE_DEPRECATED and deprecated:
+                        doc += '\n\n\nDeprecated %s Functions: ~\n\n' % name
+                        doc += deprecated
+
+                    if doc:
+                        filename = os.path.basename(filename)
+                        name = CONFIG[mode]['section_name'].get(filename, name)
+
+                        if mode == 'lua':
+                            title = 'Lua module: {}'.format(name.lower())
+                            helptag = '*lua-{}*'.format(name.lower())
+                        else:
+                            title = '{} Functions'.format(name)
+                            helptag = '*api-{}*'.format(name.lower())
+                        sections[filename] = (title, helptag, doc)
+
+        if not sections:
+            return
+
+        docs = ''
+
+        i = 0
+        for filename in CONFIG[mode]['section_order']:
+            if filename not in sections:
+                raise RuntimeError(
+                    'found new module "{}"; update the "section_order" map'.format(
+                        filename))
+            title, helptag, section_doc = sections.pop(filename)
             i += 1
-            docs += sep
-            docs += '\n%s%s' % (title, helptag.rjust(text_width - len(title)))
+            if filename not in CONFIG[mode]['append_only']:
+                docs += sep
+                docs += '\n%s%s' % (title,
+                                    helptag.rjust(text_width - len(title)))
             docs += section_doc
             docs += '\n\n\n'
 
-    docs = docs.rstrip() + '\n\n'
-    docs += ' vim:tw=78:ts=8:ft=help:norl:\n'
+        docs = docs.rstrip() + '\n\n'
+        docs += ' vim:tw=78:ts=8:ft=help:norl:\n'
 
-    doc_file = os.path.join(base_dir, 'runtime/doc', doc_filename)
-    delete_lines_below(doc_file, section_start_token)
-    with open(doc_file, 'ab') as fp:
-        fp.write(docs.encode('utf8'))
-    shutil.rmtree(out_dir)
+        doc_file = os.path.join(base_dir, 'runtime', 'doc',
+                                CONFIG[mode]['filename'])
+
+        delete_lines_below(doc_file, CONFIG[mode]['section_start_token'])
+        with open(doc_file, 'ab') as fp:
+            fp.write(docs.encode('utf8'))
+
+        shutil.rmtree(output_dir)
 
 
 def filter_source(filename):
-    """Filters the source to fix macros that confuse Doxygen."""
-    with open(filename, 'rt') as fp:
-        print(re.sub(r'^(ArrayOf|DictionaryOf)(\(.*?\))',
-                     lambda m: m.group(1)+'_'.join(
-                         re.split(r'[^\w]+', m.group(2))),
-                     fp.read(), flags=re.M))
+    name, extension = os.path.splitext(filename)
+    if extension == '.lua':
+        p = subprocess.run([lua2dox_filter, filename], stdout=subprocess.PIPE)
+        op = ('?' if 0 != p.returncode else p.stdout.decode('utf-8'))
+        print(op)
+    else:
+        """Filters the source to fix macros that confuse Doxygen."""
+        with open(filename, 'rt') as fp:
+            print(re.sub(r'^(ArrayOf|DictionaryOf)(\(.*?\))',
+                         lambda m: m.group(1)+'_'.join(
+                             re.split(r'[^\w]+', m.group(2))),
+                         fp.read(), flags=re.M))
 
 
 # Doxygen Config {{{
@@ -651,13 +737,15 @@ Doxyfile = '''
 OUTPUT_DIRECTORY       = {output}
 INPUT                  = {input}
 INPUT_ENCODING         = UTF-8
-FILE_PATTERNS          = *.h *.c
+FILE_PATTERNS          = {file_patterns}
 RECURSIVE              = YES
 INPUT_FILTER           = "{filter}"
 EXCLUDE                =
 EXCLUDE_SYMLINKS       = NO
 EXCLUDE_PATTERNS       = */private/*
 EXCLUDE_SYMBOLS        =
+EXTENSION_MAPPING      = lua=C
+EXTRACT_PRIVATE        = NO
 
 GENERATE_HTML          = NO
 GENERATE_DOCSET        = NO

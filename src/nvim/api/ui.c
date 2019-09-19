@@ -57,7 +57,7 @@ void remote_ui_disconnect(uint64_t channel_id)
   pmap_del(uint64_t)(connected_uis, channel_id);
   xfree(ui->data);
   ui->data = NULL;  // Flag UI as "stopped".
-  ui_detach_impl(ui);
+  ui_detach_impl(ui, channel_id);
   xfree(ui);
 }
 
@@ -76,6 +76,21 @@ void remote_ui_wait_for_attach(void)
                             pmap_has(uint64_t)(connected_uis, CHAN_STDIO));
 }
 
+/// Activates UI events on the channel.
+///
+/// Entry point of all UI clients.  Allows |\-\-embed| to continue startup.
+/// Implies that the client is ready to show the UI.  Adds the client to the
+/// list of UIs. |nvim_list_uis()|
+///
+/// @note If multiple UI clients are attached, the global screen dimensions
+///       degrade to the smallest client. E.g. if client A requests 80x40 but
+///       client B requests 200x100, the global screen has size 80x40.
+///
+/// @param channel_id
+/// @param width  Requested screen columns
+/// @param height  Requested screen rows
+/// @param options  |ui-option| map
+/// @param[out] err Error details, if any
 void nvim_ui_attach(uint64_t channel_id, Integer width, Integer height,
                     Dictionary options, Error *err)
   FUNC_API_SINCE(1) FUNC_API_REMOTE_ONLY
@@ -94,7 +109,9 @@ void nvim_ui_attach(uint64_t channel_id, Integer width, Integer height,
   UI *ui = xcalloc(1, sizeof(UI));
   ui->width = (int)width;
   ui->height = (int)height;
+  ui->pum_height = 0;
   ui->rgb = true;
+  ui->override = false;
   ui->grid_resize = remote_ui_grid_resize;
   ui->grid_clear = remote_ui_grid_clear;
   ui->grid_cursor_goto = remote_ui_grid_cursor_goto;
@@ -107,6 +124,7 @@ void nvim_ui_attach(uint64_t channel_id, Integer width, Integer height,
   ui->mode_change = remote_ui_mode_change;
   ui->grid_scroll = remote_ui_grid_scroll;
   ui->hl_attr_define = remote_ui_hl_attr_define;
+  ui->hl_group_set = remote_ui_hl_group_set;
   ui->raw_line = remote_ui_raw_line;
   ui->bell = remote_ui_bell;
   ui->visual_bell = remote_ui_visual_bell;
@@ -116,8 +134,7 @@ void nvim_ui_attach(uint64_t channel_id, Integer width, Integer height,
   ui->set_title = remote_ui_set_title;
   ui->set_icon = remote_ui_set_icon;
   ui->option_set = remote_ui_option_set;
-  ui->win_scroll_over_start = remote_ui_win_scroll_over_start;
-  ui->win_scroll_over_reset = remote_ui_win_scroll_over_reset;
+  ui->msg_set_pos = remote_ui_msg_set_pos;
   ui->event = remote_ui_event;
   ui->inspect = remote_ui_inspect;
 
@@ -151,7 +168,7 @@ void nvim_ui_attach(uint64_t channel_id, Integer width, Integer height,
   ui->data = data;
 
   pmap_put(uint64_t)(connected_uis, channel_id, ui);
-  ui_attach_impl(ui);
+  ui_attach_impl(ui, channel_id);
 }
 
 /// @deprecated
@@ -164,6 +181,12 @@ void ui_attach(uint64_t channel_id, Integer width, Integer height,
   api_free_dictionary(opts);
 }
 
+/// Deactivates UI events on the channel.
+///
+/// Removes the client from the list of UIs. |nvim_list_uis()|
+///
+/// @param channel_id
+/// @param[out] err Error details, if any
 void nvim_ui_detach(uint64_t channel_id, Error *err)
   FUNC_API_SINCE(1) FUNC_API_REMOTE_ONLY
 {
@@ -215,6 +238,15 @@ void nvim_ui_set_option(uint64_t channel_id, String name,
 static void ui_set_option(UI *ui, bool init, String name, Object value,
                           Error *error)
 {
+  if (strequal(name.data, "override")) {
+    if (value.type != kObjectTypeBoolean) {
+      api_set_error(error, kErrorTypeValidation, "override must be a Boolean");
+      return;
+    }
+    ui->override = value.data.boolean;
+    return;
+  }
+
   if (strequal(name.data, "rgb")) {
     if (value.type != kObjectTypeBoolean) {
       api_set_error(error, kErrorTypeValidation, "rgb must be a Boolean");
@@ -280,6 +312,35 @@ void nvim_ui_try_resize_grid(uint64_t channel_id, Integer grid, Integer width,
   }
 
   ui_grid_resize((handle_T)grid, (int)width, (int)height, err);
+}
+
+/// Tells Nvim the number of elements displaying in the popumenu, to decide
+/// <PageUp> and <PageDown> movement.
+///
+/// @param channel_id
+/// @param height  Popupmenu height, must be greater than zero.
+/// @param[out] err Error details, if any
+void nvim_ui_pum_set_height(uint64_t channel_id, Integer height, Error *err)
+  FUNC_API_SINCE(6) FUNC_API_REMOTE_ONLY
+{
+  if (!pmap_has(uint64_t)(connected_uis, channel_id)) {
+    api_set_error(err, kErrorTypeException,
+                  "UI not attached to channel: %" PRId64, channel_id);
+    return;
+  }
+
+  if (height <= 0) {
+    api_set_error(err, kErrorTypeValidation, "Expected pum height > 0");
+    return;
+  }
+
+  UI *ui = pmap_get(uint64_t)(connected_uis, channel_id);
+  if (!ui->ui_ext[kUIPopupmenu]) {
+    api_set_error(err, kErrorTypeValidation,
+                  "It must support the ext_popupmenu option");
+    return;
+  }
+  ui->pum_height = (int)height;
 }
 
 /// Pushes data into UI.UIData, to be consumed later by remote_ui_flush().

@@ -10,10 +10,10 @@ local exc_exec = helpers.exc_exec
 local feed_command = helpers.feed_command
 local insert = helpers.insert
 local NIL = helpers.NIL
-local meth_pcall = helpers.meth_pcall
 local command = helpers.command
 local bufmeths = helpers.bufmeths
 local feed = helpers.feed
+local pcall_err = helpers.pcall_err
 
 describe('api/buf', function()
   before_each(clear)
@@ -37,6 +37,41 @@ describe('api/buf', function()
       curbuf_depr('del_line', -1)
       -- There's always at least one line
       eq(1, curbuf_depr('line_count'))
+    end)
+
+    it('cursor position is maintained after lines are inserted #9961', function()
+      -- replace the buffer contents with these three lines.
+      request('nvim_buf_set_lines', 0, 0, -1, 1, {"line1", "line2", "line3", "line4"})
+      -- Set the current cursor to {3, 2}.
+      curwin('set_cursor', {3, 2})
+
+      -- add 2 lines and delete 1 line above the current cursor position.
+      request('nvim_buf_set_lines', 0, 1, 2, 1, {"line5", "line6"})
+      -- check the current set of lines in the buffer.
+      eq({"line1", "line5", "line6", "line3", "line4"}, buffer('get_lines', 0, 0, -1, 1))
+      -- cursor should be moved below by 1 line.
+      eq({4, 2}, curwin('get_cursor'))
+
+      -- add a line after the current cursor position.
+      request('nvim_buf_set_lines', 0, 5, 5, 1, {"line7"})
+      -- check the current set of lines in the buffer.
+      eq({"line1", "line5", "line6", "line3", "line4", "line7"}, buffer('get_lines', 0, 0, -1, 1))
+      -- cursor position is unchanged.
+      eq({4, 2}, curwin('get_cursor'))
+
+      -- overwrite current cursor line.
+      request('nvim_buf_set_lines', 0, 3, 5, 1, {"line8", "line9"})
+      -- check the current set of lines in the buffer.
+      eq({"line1", "line5", "line6", "line8",  "line9", "line7"}, buffer('get_lines', 0, 0, -1, 1))
+      -- cursor position is unchanged.
+      eq({4, 2}, curwin('get_cursor'))
+
+      -- delete current cursor line.
+      request('nvim_buf_set_lines', 0, 3, 5, 1, {})
+      -- check the current set of lines in the buffer.
+      eq({"line1", "line5", "line6", "line7"}, buffer('get_lines', 0, 0, -1, 1))
+      -- cursor position is unchanged.
+      eq({4, 2}, curwin('get_cursor'))
     end)
 
     it('line_count has defined behaviour for unloaded buffers', function()
@@ -155,11 +190,14 @@ describe('api/buf', function()
 
     it('fails correctly when input is not valid', function()
       eq(1, curbufmeths.get_number())
-      local err, emsg = pcall(bufmeths.set_lines, 1, 1, 2, false, {'b\na'})
-      eq(false, err)
-      local exp_emsg = 'String cannot contain newlines'
-      -- Expected {filename}:{lnum}: {exp_emsg}
-      eq(': ' .. exp_emsg, emsg:sub(-#exp_emsg - 2))
+      eq([[String cannot contain newlines]],
+        pcall_err(bufmeths.set_lines, 1, 1, 2, false, {'b\na'}))
+    end)
+
+    it("fails if 'nomodifiable'", function()
+      command('set nomodifiable')
+      eq([[Buffer is not 'modifiable']],
+        pcall_err(bufmeths.set_lines, 1, 1, 2, false, {'a','b'}))
     end)
 
     it('has correct line_count when inserting and deleting', function()
@@ -365,8 +403,8 @@ describe('api/buf', function()
       eq(16, get_offset(3))
       eq(24, get_offset(4))
       eq(29, get_offset(5))
-      eq({false,'Index out of bounds'}, meth_pcall(get_offset, 6))
-      eq({false,'Index out of bounds'}, meth_pcall(get_offset, -1))
+      eq('Index out of bounds', pcall_err(get_offset, 6))
+      eq('Index out of bounds', pcall_err(get_offset, -1))
 
       curbufmeths.set_option('eol', false)
       curbufmeths.set_option('fixeol', false)
@@ -399,15 +437,15 @@ describe('api/buf', function()
       eq(1, funcs.exists('b:lua'))
       curbufmeths.del_var('lua')
       eq(0, funcs.exists('b:lua'))
-      eq({false, 'Key not found: lua'}, meth_pcall(curbufmeths.del_var, 'lua'))
+      eq( 'Key not found: lua', pcall_err(curbufmeths.del_var, 'lua'))
       curbufmeths.set_var('lua', 1)
       command('lockvar b:lua')
-      eq({false, 'Key is locked: lua'}, meth_pcall(curbufmeths.del_var, 'lua'))
-      eq({false, 'Key is locked: lua'}, meth_pcall(curbufmeths.set_var, 'lua', 1))
-      eq({false, 'Key is read-only: changedtick'},
-         meth_pcall(curbufmeths.del_var, 'changedtick'))
-      eq({false, 'Key is read-only: changedtick'},
-         meth_pcall(curbufmeths.set_var, 'changedtick', 1))
+      eq('Key is locked: lua', pcall_err(curbufmeths.del_var, 'lua'))
+      eq('Key is locked: lua', pcall_err(curbufmeths.set_var, 'lua', 1))
+      eq('Key is read-only: changedtick',
+         pcall_err(curbufmeths.del_var, 'changedtick'))
+      eq('Key is read-only: changedtick',
+         pcall_err(curbufmeths.set_var, 'changedtick', 1))
     end)
   end)
 

@@ -11,12 +11,13 @@ typedef int32_t RgbValue;
 ///
 /// sign bit should not be used here, as it identifies invalid highlight
 typedef enum {
-  HL_INVERSE     = 0x01,
-  HL_BOLD        = 0x02,
-  HL_ITALIC      = 0x04,
-  HL_UNDERLINE   = 0x08,
-  HL_UNDERCURL   = 0x10,
-  HL_STANDOUT    = 0x20,
+  HL_INVERSE         = 0x01,
+  HL_BOLD            = 0x02,
+  HL_ITALIC          = 0x04,
+  HL_UNDERLINE       = 0x08,
+  HL_UNDERCURL       = 0x10,
+  HL_STANDOUT        = 0x20,
+  HL_STRIKETHROUGH   = 0x40,
 } HlAttrFlags;
 
 /// Stores a complete highlighting entry, including colors and attributes
@@ -25,6 +26,7 @@ typedef struct attr_entry {
   int16_t rgb_ae_attr, cterm_ae_attr;  ///< HlAttrFlags
   RgbValue rgb_fg_color, rgb_bg_color, rgb_sp_color;
   int cterm_fg_color, cterm_bg_color;
+  int hl_blend;
 } HlAttrs;
 
 #define HLATTRS_INIT (HlAttrs) { \
@@ -35,6 +37,7 @@ typedef struct attr_entry {
   .rgb_sp_color = -1, \
   .cterm_fg_color = 0, \
   .cterm_bg_color = 0, \
+  .hl_blend = -1, \
 }
 
 /// Values for index in highlight_attr[].
@@ -91,6 +94,7 @@ typedef enum {
   , HLF_INACTIVE    // NormalNC: Normal text in non-current windows
   , HLF_MSGSEP      // message separator line
   , HLF_NFLOAT      // Floating window
+  , HLF_MSG         // Message area
   , HLF_COUNT       // MUST be the last one
 } hlf_T;
 
@@ -144,10 +148,12 @@ EXTERN const char *hlf_names[] INIT(= {
   [HLF_INACTIVE] = "NormalNC",
   [HLF_MSGSEP] = "MsgSeparator",
   [HLF_NFLOAT] = "NormalFloat",
+  [HLF_MSG] = "MsgArea",
 });
 
 
 EXTERN int highlight_attr[HLF_COUNT];       // Highl. attr for each context.
+EXTERN int highlight_attr_last[HLF_COUNT];  // copy for detecting changed groups
 EXTERN int highlight_user[9];                   // User[1-9] attributes
 EXTERN int highlight_stlnc[9];                  // On top of user
 EXTERN int cterm_normal_fg_color INIT(= 0);

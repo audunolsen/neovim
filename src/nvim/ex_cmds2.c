@@ -18,6 +18,7 @@
 #endif
 #include "nvim/ex_cmds2.h"
 #include "nvim/buffer.h"
+#include "nvim/change.h"
 #include "nvim/charset.h"
 #include "nvim/eval.h"
 #include "nvim/ex_cmds.h"
@@ -43,6 +44,7 @@
 #include "nvim/screen.h"
 #include "nvim/strings.h"
 #include "nvim/undo.h"
+#include "nvim/version.h"
 #include "nvim/window.h"
 #include "nvim/profile.h"
 #include "nvim/os/os.h"
@@ -157,6 +159,7 @@ void do_debug(char_u *cmd)
   redir_off = true;             // don't redirect debug commands
 
   State = NORMAL;
+  debug_mode = true;
 
   if (!debug_did_msg) {
     MSG(_("Entering Debug mode.  Type \"cont\" to continue."));
@@ -335,6 +338,7 @@ void do_debug(char_u *cmd)
   msg_scroll = save_msg_scroll;
   lines_left = (int)(Rows - 1);
   State = save_State;
+  debug_mode = false;
   did_emsg = save_did_emsg;
   cmd_silent = save_cmd_silent;
   msg_silent = save_msg_silent;
@@ -566,7 +570,7 @@ static int dbg_parsearg(char_u *arg, garray_T *gap)
   if (here) {
     bp->dbg_lnum = curwin->w_cursor.lnum;
   } else if (gap != &prof_ga && ascii_isdigit(*p)) {
-    bp->dbg_lnum = getdigits_long(&p);
+    bp->dbg_lnum = getdigits_long(&p, true, 0);
     p = skipwhite(p);
   } else {
     bp->dbg_lnum = 0;
@@ -611,7 +615,7 @@ static int dbg_parsearg(char_u *arg, garray_T *gap)
   return OK;
 }
 
-/// ":breakadd".
+/// ":breakadd".  Also used for ":profile".
 void ex_breakadd(exarg_T *eap)
 {
   struct debuggy *bp;
@@ -989,7 +993,7 @@ void profile_dump(void)
   FILE        *fd;
 
   if (profile_fname != NULL) {
-    fd = mch_fopen((char *)profile_fname, "w");
+    fd = os_fopen((char *)profile_fname, "w");
     if (fd == NULL) {
       EMSG2(_(e_notopen), profile_fname);
     } else {
@@ -1040,12 +1044,9 @@ static void profile_reset(void)
         uf->uf_tm_self      = profile_zero();
         uf->uf_tm_children  = profile_zero();
 
-        xfree(uf->uf_tml_count);
-        xfree(uf->uf_tml_total);
-        xfree(uf->uf_tml_self);
-        uf->uf_tml_count    = NULL;
-        uf->uf_tml_total    = NULL;
-        uf->uf_tml_self     = NULL;
+        XFREE_CLEAR(uf->uf_tml_count);
+        XFREE_CLEAR(uf->uf_tml_total);
+        XFREE_CLEAR(uf->uf_tml_self);
 
         uf->uf_tml_start    = profile_zero();
         uf->uf_tml_children = profile_zero();
@@ -1056,8 +1057,7 @@ static void profile_reset(void)
     }
   }
 
-  xfree(profile_fname);
-  profile_fname = NULL;
+  XFREE_CLEAR(profile_fname);
 }
 
 /// Start profiling a script.
@@ -1080,8 +1080,8 @@ void script_prof_save(
 {
   scriptitem_T    *si;
 
-  if (current_SID > 0 && current_SID <= script_items.ga_len) {
-    si = &SCRIPT_ITEM(current_SID);
+  if (current_sctx.sc_sid > 0 && current_sctx.sc_sid <= script_items.ga_len) {
+    si = &SCRIPT_ITEM(current_sctx.sc_sid);
     if (si->sn_prof_on && si->sn_pr_nest++ == 0) {
       si->sn_pr_child = profile_start();
     }
@@ -1094,8 +1094,8 @@ void script_prof_restore(proftime_T *tm)
 {
   scriptitem_T    *si;
 
-  if (current_SID > 0 && current_SID <= script_items.ga_len) {
-    si = &SCRIPT_ITEM(current_SID);
+  if (current_sctx.sc_sid > 0 && current_sctx.sc_sid <= script_items.ga_len) {
+    si = &SCRIPT_ITEM(current_sctx.sc_sid);
     if (si->sn_prof_on && --si->sn_pr_nest == 0) {
       si->sn_pr_child = profile_end(si->sn_pr_child);
       // don't count wait time
@@ -1142,7 +1142,7 @@ static void script_dump_profile(FILE *fd)
       fprintf(fd, "\n");
       fprintf(fd, "count  total (s)   self (s)\n");
 
-      sfd = mch_fopen((char *)si->sn_name, "r");
+      sfd = os_fopen((char *)si->sn_name, "r");
       if (sfd == NULL) {
         fprintf(fd, "Cannot open file!\n");
       } else {
@@ -1192,8 +1192,8 @@ static void script_dump_profile(FILE *fd)
 /// profiled.
 bool prof_def_func(void)
 {
-  if (current_SID > 0) {
-    return SCRIPT_ITEM(current_SID).sn_pr_force;
+  if (current_sctx.sc_sid > 0) {
+    return SCRIPT_ITEM(current_sctx.sc_sid).sn_pr_force;
   }
   return false;
 }
@@ -1278,9 +1278,9 @@ bool check_changed(buf_T *buf, int flags)
       return bufIsChanged(buf);
     }
     if (flags & CCGD_EXCMD) {
-      EMSG(_(e_nowrtmsg));
+      no_write_message();
     } else {
-      EMSG(_(e_nowrtmsg_nobang));
+      no_write_message_nobang();
     }
     return true;
   }
@@ -1298,7 +1298,12 @@ void dialog_changed(buf_T *buf, bool checkall)
 {
   char_u buff[DIALOG_MSG_SIZE];
   int ret;
-  exarg_T ea;
+  // Init ea pseudo-structure, this is needed for the check_overwrite()
+  // function.
+  exarg_T ea = {
+    .append = false,
+    .forceit = false,
+  };
 
   dialog_msg(buff, _("Save changes to \"%s\"?"), buf->b_fname);
   if (checkall) {
@@ -1306,10 +1311,6 @@ void dialog_changed(buf_T *buf, bool checkall)
   } else {
     ret = vim_dialog_yesnocancel(VIM_QUESTION, NULL, buff, 1);
   }
-
-  // Init ea pseudo-structure, this is needed for the check_overwrite()
-  // function.
-  ea.append = ea.forceit = false;
 
   if (ret == VIM_YES) {
     if (buf->b_fname != NULL
@@ -1322,7 +1323,7 @@ void dialog_changed(buf_T *buf, bool checkall)
       (void)buf_write_all(buf, false);
     }
   } else if (ret == VIM_NO) {
-    unchanged(buf, true);
+    unchanged(buf, true, false);
   } else if (ret == VIM_ALL) {
     // Write all modified files that can be written.
     // Skip readonly buffers, these need to be confirmed
@@ -1347,7 +1348,7 @@ void dialog_changed(buf_T *buf, bool checkall)
   } else if (ret == VIM_DISCARDALL) {
     // mark all buffers as unchanged
     FOR_ALL_BUFFERS(buf2) {
-      unchanged(buf2, true);
+      unchanged(buf2, true, false);
     }
   }
 }
@@ -1794,19 +1795,15 @@ void ex_args(exarg_T *eap)
   } else if (eap->cmdidx == CMD_args) {
     // ":args": list arguments.
     if (ARGCOUNT > 0) {
+      char_u **items = xmalloc(sizeof(char_u *) * (size_t)ARGCOUNT);
       // Overwrite the command, for a short list there is no scrolling
       // required and no wait_return().
       gotocmdline(true);
       for (int i = 0; i < ARGCOUNT; i++) {
-        if (i == curwin->w_arg_idx) {
-          msg_putchar('[');
-        }
-        msg_outtrans(alist_name(&ARGLIST[i]));
-        if (i == curwin->w_arg_idx) {
-          msg_putchar(']');
-        }
-        msg_putchar(' ');
+        items[i] = alist_name(&ARGLIST[i]);
       }
+      list_in_columns(items, ARGCOUNT, curwin->w_arg_idx);
+      xfree(items);
     }
   } else if (eap->cmdidx == CMD_arglocal) {
     garray_T        *gap = &curwin->w_alist->al_ga;
@@ -1952,14 +1949,17 @@ void ex_next(exarg_T *eap)
 void ex_argedit(exarg_T *eap)
 {
   int i = eap->addr_count ? (int)eap->line2 : curwin->w_arg_idx + 1;
+  // Whether curbuf will be reused, curbuf->b_ffname will be set.
+  bool curbuf_is_reusable = curbuf_reusable();
 
   if (do_arglist(eap->arg, AL_ADD, i) == FAIL) {
     return;
   }
   maketitle();
 
-  if (curwin->w_arg_idx == 0 && (curbuf->b_ml.ml_flags & ML_EMPTY)
-      && curbuf->b_ffname == NULL) {
+  if (curwin->w_arg_idx == 0
+      && (curbuf->b_ml.ml_flags & ML_EMPTY)
+      && (curbuf->b_ffname == NULL || curbuf_is_reusable)) {
     i = 0;
   }
   // Edit the argument.
@@ -2257,7 +2257,8 @@ static int alist_add_list(int count, char_u **files, int after)
     }
     for (int i = 0; i < count; i++) {
       ARGLIST[after + i].ae_fname = files[i];
-      ARGLIST[after + i].ae_fnum = buflist_add(files[i], BLN_LISTED);
+      ARGLIST[after + i].ae_fnum = buflist_add(files[i],
+                                               BLN_LISTED | BLN_CURBUF);
     }
     ALIST(curwin)->al_ga.ga_len += count;
     if (old_argcount > 0 && curwin->w_arg_idx >= after) {
@@ -2820,7 +2821,10 @@ void ex_packadd(exarg_T *eap)
 /// ":options"
 void ex_options(exarg_T *eap)
 {
-  vim_setenv("OPTWIN_CMD", cmdmod.tab ? "tab" : "");
+  os_setenv("OPTWIN_CMD", cmdmod.tab ? "tab" : "", 1);
+  os_setenv("OPTWIN_CMD",
+            cmdmod.tab ? "tab" :
+            (cmdmod.split & WSP_VERT) ? "vert" : "", 1);
   cmd_source((char_u *)SYS_OPTWIN_FILE, NULL);
 }
 
@@ -2828,9 +2832,9 @@ void ex_options(exarg_T *eap)
 void init_pyxversion(void)
 {
   if (p_pyx == 0) {
-    if (!eval_has_provider("python3")) {
+    if (eval_has_provider("python3")) {
       p_pyx = 3;
-    } else if (!eval_has_provider("python")) {
+    } else if (eval_has_provider("python")) {
       p_pyx = 2;
     }
   }
@@ -2854,7 +2858,7 @@ static int requires_py_version(char_u *filename)
     lines = 5;
   }
 
-  file = mch_fopen((char *)filename, "r");
+  file = os_fopen((char *)filename, "r");
   if (file != NULL) {
     for (i = 0; i < lines; i++) {
       if (vim_fgets(IObuff, IOSIZE, file)) {
@@ -3029,12 +3033,13 @@ int do_source(char_u *fname, int check_other, int is_vimrc)
   char_u                  *fname_exp;
   char_u                  *firstline = NULL;
   int retval = FAIL;
-  scid_T save_current_SID;
   static scid_T last_current_SID = 0;
+  static int last_current_SID_seq = 0;
   void                    *save_funccalp;
   int save_debug_break_level = debug_break_level;
   scriptitem_T            *si = NULL;
   proftime_T wait_start;
+  bool trigger_source_post = false;
 
   p = expand_env_save(fname);
   if (p == NULL) {
@@ -3055,6 +3060,10 @@ int do_source(char_u *fname, int check_other, int is_vimrc)
       && apply_autocmds(EVENT_SOURCECMD, fname_exp, fname_exp,
                         false, curbuf)) {
     retval = aborting() ? FAIL : OK;
+    if (retval == OK) {
+      // Apply SourcePost autocommands.
+      apply_autocmds(EVENT_SOURCEPOST, fname_exp, fname_exp, false, curbuf);
+    }
     goto theend;
   }
 
@@ -3102,8 +3111,6 @@ int do_source(char_u *fname, int check_other, int is_vimrc)
   }
   if (is_vimrc == DOSO_VIMRC) {
     vimrc_found(fname_exp, (char_u *)"MYVIMRC");
-  } else if (is_vimrc == DOSO_GVIMRC) {
-    vimrc_found(fname_exp, (char_u *)"MYGVIMRC");
   }
 
 #ifdef USE_CRNL
@@ -3152,12 +3159,16 @@ int do_source(char_u *fname, int check_other, int is_vimrc)
 
   // Check if this script was sourced before to finds its SID.
   // If it's new, generate a new SID.
-  save_current_SID = current_SID;
+  // Always use a new sequence number.
+  const sctx_T save_current_sctx = current_sctx;
+  current_sctx.sc_seq = ++last_current_SID_seq;
+  current_sctx.sc_lnum = 0;
   FileID file_id;
   bool file_id_ok = os_fileid((char *)fname_exp, &file_id);
   assert(script_items.ga_len >= 0);
-  for (current_SID = script_items.ga_len; current_SID > 0; current_SID--) {
-    si = &SCRIPT_ITEM(current_SID);
+  for (current_sctx.sc_sid = script_items.ga_len; current_sctx.sc_sid > 0;
+       current_sctx.sc_sid--) {
+    si = &SCRIPT_ITEM(current_sctx.sc_sid);
     // Compare dev/ino when possible, it catches symbolic links.
     // Also compare file names, the inode may change when the file was edited.
     bool file_id_equal = file_id_ok && si->file_id_valid
@@ -3167,17 +3178,17 @@ int do_source(char_u *fname, int check_other, int is_vimrc)
       break;
     }
   }
-  if (current_SID == 0) {
-    current_SID = ++last_current_SID;
-    ga_grow(&script_items, (int)(current_SID - script_items.ga_len));
-    while (script_items.ga_len < current_SID) {
+  if (current_sctx.sc_sid == 0) {
+    current_sctx.sc_sid = ++last_current_SID;
+    ga_grow(&script_items, (int)(current_sctx.sc_sid - script_items.ga_len));
+    while (script_items.ga_len < current_sctx.sc_sid) {
       script_items.ga_len++;
       SCRIPT_ITEM(script_items.ga_len).sn_name = NULL;
       SCRIPT_ITEM(script_items.ga_len).sn_prof_on = false;
     }
-    si = &SCRIPT_ITEM(current_SID);
+    si = &SCRIPT_ITEM(current_sctx.sc_sid);
     si->sn_name = fname_exp;
-    fname_exp = NULL;
+    fname_exp = vim_strsave(si->sn_name);  // used for autocmd
     if (file_id_ok) {
       si->file_id_valid = true;
       si->file_id = file_id;
@@ -3186,7 +3197,7 @@ int do_source(char_u *fname, int check_other, int is_vimrc)
     }
 
     // Allocate the local script variables to use for this script.
-    new_script_vars(current_SID);
+    new_script_vars(current_sctx.sc_sid);
   }
 
   if (l_do_profiling == PROF_YES) {
@@ -3227,7 +3238,7 @@ int do_source(char_u *fname, int check_other, int is_vimrc)
 
   if (l_do_profiling == PROF_YES) {
     // Get "si" again, "script_items" may have been reallocated.
-    si = &SCRIPT_ITEM(current_SID);
+    si = &SCRIPT_ITEM(current_sctx.sc_sid);
     if (si->sn_prof_on) {
       si->sn_pr_start = profile_end(si->sn_pr_start);
       si->sn_pr_start = profile_sub_wait(wait_start, si->sn_pr_start);
@@ -3257,6 +3268,10 @@ int do_source(char_u *fname, int check_other, int is_vimrc)
     time_pop(rel_time);
   }
 
+  if (!got_int) {
+    trigger_source_post = true;
+  }
+
   // After a "finish" in debug mode, need to break at first command of next
   // sourced file.
   if (save_debug_break_level > ex_nesting_level
@@ -3264,7 +3279,7 @@ int do_source(char_u *fname, int check_other, int is_vimrc)
     debug_break_level++;
   }
 
-  current_SID = save_current_SID;
+  current_sctx = save_current_sctx;
   restore_funccal(save_funccalp);
   if (l_do_profiling == PROF_YES) {
     prof_child_exit(&wait_start);    // leaving a child now
@@ -3273,6 +3288,10 @@ int do_source(char_u *fname, int check_other, int is_vimrc)
   xfree(cookie.nextline);
   xfree(firstline);
   convert_setup(&cookie.conv, NULL, NULL);
+
+  if (trigger_source_post) {
+    apply_autocmds(EVENT_SOURCEPOST, fname_exp, fname_exp, false, curbuf);
+  }
 
 theend:
   xfree(fname_exp);
@@ -3321,7 +3340,7 @@ char_u *get_scriptname(LastSet last_set, bool *should_free)
 {
   *should_free = false;
 
-  switch (last_set.script_id) {
+  switch (last_set.script_ctx.sc_sid) {
     case SID_MODELINE:
       return (char_u *)_("modeline");
     case SID_CMDARG:
@@ -3341,7 +3360,8 @@ char_u *get_scriptname(LastSet last_set, bool *should_free)
       return IObuff;
     default:
       *should_free = true;
-      return home_replace_save(NULL, SCRIPT_ITEM(last_set.script_id).sn_name);
+      return home_replace_save(NULL,
+                               SCRIPT_ITEM(last_set.script_ctx.sc_sid).sn_name);
   }
 }
 
@@ -3399,13 +3419,18 @@ char_u *getsourceline(int c, void *cookie, int indent)
     // Get the next line and concatenate it when it starts with a
     // backslash. We always need to read the next line, keep it in
     // sp->nextline.
+    // Also check for a comment in between continuation lines: "\ .
     sp->nextline = get_one_sourceline(sp);
-    if (sp->nextline != NULL && *(p = skipwhite(sp->nextline)) == '\\') {
+    if (sp->nextline != NULL
+        && (*(p = skipwhite(sp->nextline)) == '\\'
+            || (p[0] == '"' && p[1] == '\\' && p[2] == ' '))) {
       garray_T ga;
 
       ga_init(&ga, (int)sizeof(char_u), 400);
       ga_concat(&ga, line);
-      ga_concat(&ga, p + 1);
+      if (*p == '\\') {
+        ga_concat(&ga, p + 1);
+      }
       for (;; ) {
         xfree(sp->nextline);
         sp->nextline = get_one_sourceline(sp);
@@ -3413,15 +3438,16 @@ char_u *getsourceline(int c, void *cookie, int indent)
           break;
         }
         p = skipwhite(sp->nextline);
-        if (*p != '\\') {
+        if (*p == '\\') {
+          // Adjust the growsize to the current length to speed up
+          // concatenating many lines.
+          if (ga.ga_len > 400) {
+            ga_set_growsize(&ga, (ga.ga_len > 8000) ? 8000 : ga.ga_len);
+          }
+          ga_concat(&ga, p + 1);
+        } else if (p[0] != '"' || p[1] != '\\' || p[2] != ' ') {
           break;
         }
-        // Adjust the growsize to the current length to speed up
-        // concatenating many lines.
-        if (ga.ga_len > 400) {
-          ga_set_growsize(&ga, (ga.ga_len > 8000) ? 8000 : ga.ga_len);
-        }
-        ga_concat(&ga, p + 1);
       }
       ga_append(&ga, NUL);
       xfree(line);
@@ -3562,10 +3588,10 @@ void script_line_start(void)
   scriptitem_T    *si;
   sn_prl_T        *pp;
 
-  if (current_SID <= 0 || current_SID > script_items.ga_len) {
+  if (current_sctx.sc_sid <= 0 || current_sctx.sc_sid > script_items.ga_len) {
     return;
   }
-  si = &SCRIPT_ITEM(current_SID);
+  si = &SCRIPT_ITEM(current_sctx.sc_sid);
   if (si->sn_prof_on && sourcing_lnum >= 1) {
     // Grow the array before starting the timer, so that the time spent
     // here isn't counted.
@@ -3593,10 +3619,10 @@ void script_line_exec(void)
 {
   scriptitem_T    *si;
 
-  if (current_SID <= 0 || current_SID > script_items.ga_len) {
+  if (current_sctx.sc_sid <= 0 || current_sctx.sc_sid > script_items.ga_len) {
     return;
   }
-  si = &SCRIPT_ITEM(current_SID);
+  si = &SCRIPT_ITEM(current_sctx.sc_sid);
   if (si->sn_prof_on && si->sn_prl_idx >= 0) {
     si->sn_prl_execed = true;
   }
@@ -3608,10 +3634,10 @@ void script_line_end(void)
   scriptitem_T    *si;
   sn_prl_T        *pp;
 
-  if (current_SID <= 0 || current_SID > script_items.ga_len) {
+  if (current_sctx.sc_sid <= 0 || current_sctx.sc_sid > script_items.ga_len) {
     return;
   }
-  si = &SCRIPT_ITEM(current_SID);
+  si = &SCRIPT_ITEM(current_sctx.sc_sid);
   if (si->sn_prof_on && si->sn_prl_idx >= 0
       && si->sn_prl_idx < si->sn_prl_ga.ga_len) {
     if (si->sn_prl_execed) {
@@ -3906,19 +3932,19 @@ void ex_language(exarg_T *eap)
       _nl_msg_cat_cntr++;
 #endif
       // Reset $LC_ALL, otherwise it would overrule everything.
-      vim_setenv("LC_ALL", "");
+      os_setenv("LC_ALL", "", 1);
 
       if (what != LC_TIME) {
         // Tell gettext() what to translate to.  It apparently doesn't
         // use the currently effective locale.
         if (what == LC_ALL) {
-          vim_setenv("LANG", (char *)name);
+          os_setenv("LANG", (char *)name, 1);
 
           // Clear $LANGUAGE because GNU gettext uses it.
-          vim_setenv("LANGUAGE", "");
+          os_setenv("LANGUAGE", "", 1);
         }
         if (what != LC_CTYPE) {
-          vim_setenv("LC_MESSAGES", (char *)name);
+          os_setenv("LC_MESSAGES", (char *)name, 1);
           set_helplang_default((char *)name);
         }
       }
@@ -3989,8 +4015,7 @@ void free_locales(void)
     for (i = 0; locales[i] != NULL; i++) {
       xfree(locales[i]);
     }
-    xfree(locales);
-    locales = NULL;
+    XFREE_CLEAR(locales);
   }
 }
 

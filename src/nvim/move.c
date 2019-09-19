@@ -95,6 +95,8 @@ static void comp_botline(win_T *wp)
   wp->w_valid |= VALID_BOTLINE|VALID_BOTLINE_AP;
 
   set_empty_rows(wp, done);
+
+  win_check_anchored_floats(wp);
 }
 
 void reset_cursorline(void)
@@ -103,7 +105,8 @@ void reset_cursorline(void)
 }
 
 // Redraw when w_cline_row changes and 'relativenumber' or 'cursorline' is set.
-static void redraw_for_cursorline(win_T *wp)
+void redraw_for_cursorline(win_T *wp)
+  FUNC_ATTR_NONNULL_ALL
 {
   if ((wp->w_p_rnu || win_cursorline_standout(wp))
       && (wp->w_valid & VALID_CROW) == 0
@@ -119,11 +122,9 @@ static void redraw_for_cursorline(win_T *wp)
         // the current window.
         redrawWinline(wp, wp->w_last_cursorline);
         redrawWinline(wp, wp->w_cursor.lnum);
-        redraw_win_later(wp, VALID);
       } else {
         redraw_win_later(wp, SOME_VALID);
       }
-      wp->w_last_cursorline = wp->w_cursor.lnum;
     }
   }
 }
@@ -311,6 +312,7 @@ void update_topline(void)
     }
   }
   curwin->w_valid |= VALID_TOPLINE;
+  win_check_anchored_floats(curwin);
 
   /*
    * Need to redraw when topline changed.
@@ -828,7 +830,8 @@ void curs_columns(
         new_leftcol = 0;
       if (new_leftcol != (int)curwin->w_leftcol) {
         curwin->w_leftcol = new_leftcol;
-        /* screen has to be redrawn with new curwin->w_leftcol */
+        win_check_anchored_floats(curwin);
+        // screen has to be redrawn with new curwin->w_leftcol
         redraw_later(NOT_VALID);
       }
     }
@@ -847,11 +850,11 @@ void curs_columns(
 
   prev_skipcol = curwin->w_skipcol;
 
-  int p_lines = 0;
+  int plines = 0;
   if ((curwin->w_wrow >= curwin->w_height_inner
        || ((prev_skipcol > 0
             || curwin->w_wrow + p_so >= curwin->w_height_inner)
-           && (p_lines =
+           && (plines =
                plines_win_nofill(curwin, curwin->w_cursor.lnum, false)) - 1
            >= curwin->w_height_inner))
       && curwin->w_height_inner != 0
@@ -870,20 +873,21 @@ void curs_columns(
       extra = 1;
     /* Compute last display line of the buffer line that we want at the
      * bottom of the window. */
-    if (p_lines == 0)
-      p_lines = plines_win(curwin, curwin->w_cursor.lnum, false);
-    --p_lines;
-    if (p_lines > curwin->w_wrow + p_so) {
+    if (plines == 0) {
+      plines = plines_win(curwin, curwin->w_cursor.lnum, false);
+    }
+    plines--;
+    if (plines > curwin->w_wrow + p_so) {
       assert(p_so <= INT_MAX);
       n = curwin->w_wrow + (int)p_so;
+    } else {
+      n = plines;
     }
-    else
-      n = p_lines;
     if ((colnr_T)n >= curwin->w_height_inner + curwin->w_skipcol / width) {
       extra += 2;
     }
 
-    if (extra == 3 || p_lines < p_so * 2) {
+    if (extra == 3 || plines < p_so * 2) {
       // not enough room for 'scrolloff', put cursor in the middle
       n = curwin->w_virtcol / width;
       if (n > curwin->w_height_inner / 2) {
@@ -892,8 +896,8 @@ void curs_columns(
         n = 0;
       }
       // don't skip more than necessary
-      if (n > p_lines - curwin->w_height_inner + 1) {
-        n = p_lines - curwin->w_height_inner + 1;
+      if (n > plines - curwin->w_height_inner + 1) {
+        n = plines - curwin->w_height_inner + 1;
       }
       curwin->w_skipcol = n * width;
     } else if (extra == 1) {
@@ -941,6 +945,74 @@ void curs_columns(
   }
 
   curwin->w_valid |= VALID_WCOL|VALID_WROW|VALID_VIRTCOL;
+}
+
+/// Compute the screen position of text character at "pos" in window "wp"
+/// The resulting values are one-based, zero when character is not visible.
+///
+/// @param[out] rowp screen row
+/// @param[out] scolp start screen column
+/// @param[out] ccolp cursor screen column
+/// @param[out] ecolp end screen column
+void textpos2screenpos(win_T *wp, pos_T *pos, int *rowp, int *scolp,
+                       int *ccolp, int *ecolp, bool local)
+{
+  colnr_T scol = 0, ccol = 0, ecol = 0;
+  int row = 0;
+  int rowoff = 0;
+  colnr_T coloff = 0;
+  bool visible_row = false;
+
+  if (pos->lnum >= wp->w_topline && pos->lnum < wp->w_botline) {
+    row = plines_m_win(wp, wp->w_topline, pos->lnum - 1) + 1;
+    visible_row = true;
+  } else if (pos->lnum < wp->w_topline) {
+    row = 0;
+  } else {
+    row = wp->w_height_inner;
+  }
+
+  bool existing_row = (pos->lnum > 0
+                       && pos->lnum <= wp->w_buffer->b_ml.ml_line_count);
+
+  if ((local && existing_row) || visible_row) {
+    colnr_T off;
+    colnr_T col;
+    int     width;
+
+    getvcol(wp, pos, &scol, &ccol, &ecol);
+
+    // similar to what is done in validate_cursor_col()
+    col = scol;
+    off = win_col_off(wp);
+    col += off;
+    width = wp->w_width - off + win_col_off2(wp);
+
+    // long line wrapping, adjust row
+    if (wp->w_p_wrap && col >= (colnr_T)wp->w_width && width > 0) {
+      // use same formula as what is used in curs_columns()
+      rowoff = visible_row ? ((col - wp->w_width) / width + 1) : 0;
+      col -= rowoff * width;
+    }
+
+    col -= wp->w_leftcol;
+
+    if (col >= 0 && col < width) {
+      coloff = col - scol + (local ? 0 : wp->w_wincol) + 1;
+    } else {
+      scol = ccol = ecol = 0;
+      // character is left or right of the window
+      if (local) {
+        coloff = col < 0 ? -1 : wp->w_width_inner + 1;
+      } else {
+        row = 0;
+      }
+    }
+  }
+  *rowp = (local ? 0 : wp->w_winrow) + row + rowoff;
+  *scolp = scol + coloff;
+  *ccolp = ccol + coloff;
+  *ecolp = ecol + coloff;
 }
 
 /*
@@ -1099,6 +1171,7 @@ check_topfill (
       }
     }
   }
+  win_check_anchored_floats(curwin);
 }
 
 /*
@@ -1245,12 +1318,12 @@ static void botline_forw(lineoff_T *lp)
   } else {
     ++lp->lnum;
     lp->fill = 0;
-    if (lp->lnum > curbuf->b_ml.ml_line_count)
+    if (lp->lnum > curbuf->b_ml.ml_line_count) {
       lp->height = MAXCOL;
-    else if (hasFolding(lp->lnum, NULL, &lp->lnum))
-      /* Add a closed fold */
+    } else if (hasFolding(lp->lnum, NULL, &lp->lnum)) {
+      // Add a closed fold
       lp->height = 1;
-    else {
+    } else {
       lp->height = plines_nofill(lp->lnum);
     }
   }
@@ -1524,9 +1597,9 @@ void scroll_cursor_bot(int min_scroll, int set_topbot)
       /* Count screen lines that are below the window. */
       scrolled += loff.height;
       if (loff.lnum == curwin->w_botline
-          && boff.fill == 0
-          )
+          && loff.fill == 0) {
         scrolled -= curwin->w_empty_rows;
+      }
     }
 
     if (boff.lnum < curbuf->b_ml.ml_line_count) {

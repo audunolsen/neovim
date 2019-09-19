@@ -82,7 +82,6 @@ fun! Test_normal00_optrans()
 endfunc
 
 func! Test_normal01_keymodel()
-  throw "skipped: Nvim regression: 'keymodel'"
   call Setup_NewWindow()
   " Test 1: depending on 'keymodel' <s-down> does something different
   50
@@ -1353,11 +1352,21 @@ func! Test_normal23_K()
     bw!
     return
   endif
-  set keywordprg=man\ --pager=cat
+
+  if has('mac')
+    " In MacOS, the option for specifying a pager is different
+    set keywordprg=man\ -P\ cat
+  else
+    set keywordprg=man\ --pager=cat
+  endif
   " Test for using man
   2
   let a = execute('unsilent norm! K')
-  call assert_match("man --pager=cat 'man'", a)
+  if has('mac')
+    call assert_match("man -P cat 'man'", a)
+  else
+    call assert_match("man --pager=cat 'man'", a)
+  endif
 
   " clean up
   let &keywordprg = k
@@ -1365,10 +1374,6 @@ func! Test_normal23_K()
 endfunc
 
 func! Test_normal24_rot13()
-  " This test uses multi byte characters
-  if !has("multi_byte")
-    return
-  endif
   " Testing for g?? g?g?
   new
   call append(0, 'abcdefghijklmnopqrstuvwxyzäüö')
@@ -1619,10 +1624,6 @@ fun! Test_normal29_brace()
 endfunc
 
 fun! Test_normal30_changecase()
-  " This test uses multi byte characters
-  if !has("multi_byte")
-    return
-  endif
   new
   call append(0, 'This is a simple test: äüöß')
   norm! 1ggVu
@@ -1892,42 +1893,36 @@ func! Test_g_ctrl_g()
   call assert_equal("\nCol 1 of 10; Line 1 of 2; Word 1 of 4; Char 1 of 23; Byte 1 of 22", a)
   set bin & eol&
 
-  if has('multi_byte')
-    call setline(1, ['Français', '日本語'])
+  call setline(1, ['Français', '日本語'])
 
-    let a = execute(":norm! \<Esc>gojlg\<c-g>")
-    call assert_equal("\nCol 4-3 of 9-6; Line 2 of 2; Word 2 of 2; Char 11 of 13; Byte 16 of 20", a)
+  let a = execute(":norm! \<Esc>gojlg\<c-g>")
+  call assert_equal("\nCol 4-3 of 9-6; Line 2 of 2; Word 2 of 2; Char 11 of 13; Byte 16 of 20", a)
 
-    let a = execute(":norm! \<Esc>gojvlg\<c-g>")
-    call assert_equal("\nSelected 1 of 2 Lines; 1 of 2 Words; 2 of 13 Chars; 6 of 20 Bytes", a)
+  let a = execute(":norm! \<Esc>gojvlg\<c-g>")
+  call assert_equal("\nSelected 1 of 2 Lines; 1 of 2 Words; 2 of 13 Chars; 6 of 20 Bytes", a)
 
-    let a = execute(":norm! \<Esc>goll\<c-v>jlg\<c-g>")
-    call assert_equal("\nSelected 4 Cols; 2 of 2 Lines; 2 of 2 Words; 6 of 13 Chars; 11 of 20 Bytes", a)
+  let a = execute(":norm! \<Esc>goll\<c-v>jlg\<c-g>")
+  call assert_equal("\nSelected 4 Cols; 2 of 2 Lines; 2 of 2 Words; 6 of 13 Chars; 11 of 20 Bytes", a)
 
-    set fenc=utf8 bomb
-    let a = execute(":norm! \<Esc>gojlg\<c-g>")
-    call assert_equal("\nCol 4-3 of 9-6; Line 2 of 2; Word 2 of 2; Char 11 of 13; Byte 16 of 20(+3 for BOM)", a)
+  set fenc=utf8 bomb
+  let a = execute(":norm! \<Esc>gojlg\<c-g>")
+  call assert_equal("\nCol 4-3 of 9-6; Line 2 of 2; Word 2 of 2; Char 11 of 13; Byte 16 of 20(+3 for BOM)", a)
 
-    set fenc=utf16 bomb
-    let a = execute(":norm! g\<c-g>")
-    call assert_equal("\nCol 4-3 of 9-6; Line 2 of 2; Word 2 of 2; Char 11 of 13; Byte 16 of 20(+2 for BOM)", a)
+  set fenc=utf16 bomb
+  let a = execute(":norm! g\<c-g>")
+  call assert_equal("\nCol 4-3 of 9-6; Line 2 of 2; Word 2 of 2; Char 11 of 13; Byte 16 of 20(+2 for BOM)", a)
 
-    set fenc=utf32 bomb
-    let a = execute(":norm! g\<c-g>")
-    call assert_equal("\nCol 4-3 of 9-6; Line 2 of 2; Word 2 of 2; Char 11 of 13; Byte 16 of 20(+4 for BOM)", a)
+  set fenc=utf32 bomb
+  let a = execute(":norm! g\<c-g>")
+  call assert_equal("\nCol 4-3 of 9-6; Line 2 of 2; Word 2 of 2; Char 11 of 13; Byte 16 of 20(+4 for BOM)", a)
 
-    set fenc& bomb&
-  endif
+  set fenc& bomb&
 
   set ff&
   bwipe!
 endfunc
 
 fun! Test_normal34_g_cmd3()
-  if !has("multi_byte")
-    return
-  endif
-
   " Test for g8
   new
   let a=execute(':norm! 1G0g8')
@@ -1946,9 +1941,6 @@ fun! Test_normal34_g_cmd3()
 endfunc
 
 func Test_normal_8g8()
-  if !has("multi_byte")
-    return
-  endif
   new
 
   " Test 8g8 which finds invalid utf8 at or after the cursor.
@@ -2272,6 +2264,8 @@ endfunc
 
 func! Test_normal45_drop()
   if !has('dnd')
+    " The ~ register does not exist
+    call assert_beeps('norm! "~')
     return
   endif
 
@@ -2287,11 +2281,6 @@ func! Test_normal45_drop()
 endfunc
 
 func! Test_normal46_ignore()
-  " This test uses multi byte characters
-  if !has("multi_byte")
-    return
-  endif
-
   new
   " How to test this?
   " let's just for now test, that the buffer
@@ -2464,9 +2453,7 @@ func Test_normal54_Ctrl_bsl()
   call assert_equal(['abcdefghijklmn'], getline(1,'$'))
   exe "norm! df\<c-\>m"
   call assert_equal(['abcdefghijklmn'], getline(1,'$'))
-  if !has("multi_byte")
-    return
-  endif
+
   call setline(2, 'abcdefghijklmnāf')
   norm! 2gg0
   exe "norm! df\<Char-0x101>"
@@ -2530,13 +2517,103 @@ func Test_changelist()
 endfunc
 
 func Test_delete_until_paragraph()
-  if !has('multi_byte')
-    return
-  endif
   new
   normal grádv}
   call assert_equal('á', getline(1))
   normal grád}
   call assert_equal('', getline(1))
   bwipe!
+endfunc
+
+func Test_message_when_using_ctrl_c()
+  " Make sure no buffers are changed.
+  %bwipe!
+
+  exe "normal \<C-C>"
+  call assert_match("Type  :qa  and press <Enter> to exit Nvim", Screenline(&lines))
+
+  new
+  cal setline(1, 'hi!')
+  exe "normal \<C-C>"
+  call assert_match("Type  :qa!  and press <Enter> to abandon all changes and exit Nvim", Screenline(&lines))
+
+  bwipe!
+endfunc
+
+" Test for '[m', ']m', '[M' and ']M'
+" Jumping to beginning and end of methods in Java-like languages
+func Test_java_motion()
+  new
+  a
+Piece of Java
+{
+	tt m1 {
+		t1;
+	} e1
+
+	tt m2 {
+		t2;
+	} e2
+
+	tt m3 {
+		if (x)
+		{
+			t3;
+		}
+	} e3
+}
+.
+
+  normal gg
+
+  normal 2]maA
+  call assert_equal("\ttt m1 {A", getline('.'))
+  call assert_equal([3, 9, 16], [line('.'), col('.'), virtcol('.')])
+
+  normal j]maB
+  call assert_equal("\ttt m2 {B", getline('.'))
+  call assert_equal([7, 9, 16], [line('.'), col('.'), virtcol('.')])
+
+  normal ]maC
+  call assert_equal("\ttt m3 {C", getline('.'))
+  call assert_equal([11, 9, 16], [line('.'), col('.'), virtcol('.')])
+
+  normal [maD
+  call assert_equal("\ttt m3 {DC", getline('.'))
+  call assert_equal([11, 9, 16], [line('.'), col('.'), virtcol('.')])
+
+  normal k2[maE
+  call assert_equal("\ttt m1 {EA", getline('.'))
+  call assert_equal([3, 9, 16], [line('.'), col('.'), virtcol('.')])
+
+  normal 3[maF
+  call assert_equal("{F", getline('.'))
+  call assert_equal([2, 2, 2], [line('.'), col('.'), virtcol('.')])
+
+  normal ]MaG
+  call assert_equal("\t}G e1", getline('.'))
+  call assert_equal([5, 3, 10], [line('.'), col('.'), virtcol('.')])
+
+  normal j2]MaH
+  call assert_equal("\t}H e3", getline('.'))
+  call assert_equal([16, 3, 10], [line('.'), col('.'), virtcol('.')])
+
+  normal ]M]M
+  normal aI
+  call assert_equal("}I", getline('.'))
+  call assert_equal([17, 2, 2], [line('.'), col('.'), virtcol('.')])
+
+  normal 2[MaJ
+  call assert_equal("\t}JH e3", getline('.'))
+  call assert_equal([16, 3, 10], [line('.'), col('.'), virtcol('.')])
+
+  normal k[MaK
+  call assert_equal("\t}K e2", getline('.'))
+  call assert_equal([9, 3, 10], [line('.'), col('.'), virtcol('.')])
+
+  normal 3[MaL
+  call assert_equal("{LF", getline('.'))
+  call assert_equal([2, 2, 2], [line('.'), col('.'), virtcol('.')])
+
+  close!
 endfunc

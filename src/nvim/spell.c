@@ -72,7 +72,6 @@
 #include <inttypes.h>
 #include <limits.h>
 #include <stdbool.h>
-#include <stdint.h>
 #include <string.h>
 #include <stdlib.h>
 #include <wctype.h>
@@ -84,6 +83,7 @@
 #include "nvim/ascii.h"
 #include "nvim/spell.h"
 #include "nvim/buffer.h"
+#include "nvim/change.h"
 #include "nvim/charset.h"
 #include "nvim/cursor.h"
 #include "nvim/edit.h"
@@ -1626,7 +1626,7 @@ static void spell_load_lang(char_u *lang)
     if (starting) {
       // Prompt the user at VimEnter if spell files are missing. #3027
       // Plugins aren't loaded yet, so spellfile.vim cannot handle this case.
-      char autocmd_buf[128] = { 0 };
+      char autocmd_buf[512] = { 0 };
       snprintf(autocmd_buf, sizeof(autocmd_buf),
                "autocmd VimEnter * call spellfile#LoadFile('%s')|set spell",
                lang);
@@ -1708,19 +1708,13 @@ void slang_clear(slang_T *lp)
 {
   garray_T    *gap;
 
-  xfree(lp->sl_fbyts);
-  lp->sl_fbyts = NULL;
-  xfree(lp->sl_kbyts);
-  lp->sl_kbyts = NULL;
-  xfree(lp->sl_pbyts);
-  lp->sl_pbyts = NULL;
+  XFREE_CLEAR(lp->sl_fbyts);
+  XFREE_CLEAR(lp->sl_kbyts);
+  XFREE_CLEAR(lp->sl_pbyts);
 
-  xfree(lp->sl_fidxs);
-  lp->sl_fidxs = NULL;
-  xfree(lp->sl_kidxs);
-  lp->sl_kidxs = NULL;
-  xfree(lp->sl_pidxs);
-  lp->sl_pidxs = NULL;
+  XFREE_CLEAR(lp->sl_fidxs);
+  XFREE_CLEAR(lp->sl_kidxs);
+  XFREE_CLEAR(lp->sl_pidxs);
 
   GA_DEEP_CLEAR(&lp->sl_rep, fromto_T, free_fromto);
   GA_DEEP_CLEAR(&lp->sl_repsal, fromto_T, free_fromto);
@@ -1738,26 +1732,17 @@ void slang_clear(slang_T *lp)
     vim_regfree(lp->sl_prefprog[i]);
   }
   lp->sl_prefixcnt = 0;
-  xfree(lp->sl_prefprog);
-  lp->sl_prefprog = NULL;
-
-  xfree(lp->sl_info);
-  lp->sl_info = NULL;
-
-  xfree(lp->sl_midword);
-  lp->sl_midword = NULL;
+  XFREE_CLEAR(lp->sl_prefprog);
+  XFREE_CLEAR(lp->sl_info);
+  XFREE_CLEAR(lp->sl_midword);
 
   vim_regfree(lp->sl_compprog);
-  xfree(lp->sl_comprules);
-  xfree(lp->sl_compstartflags);
-  xfree(lp->sl_compallflags);
   lp->sl_compprog = NULL;
-  lp->sl_comprules = NULL;
-  lp->sl_compstartflags = NULL;
-  lp->sl_compallflags = NULL;
+  XFREE_CLEAR(lp->sl_comprules);
+  XFREE_CLEAR(lp->sl_compstartflags);
+  XFREE_CLEAR(lp->sl_compallflags);
 
-  xfree(lp->sl_syllable);
-  lp->sl_syllable = NULL;
+  XFREE_CLEAR(lp->sl_syllable);
   ga_clear(&lp->sl_syl_items);
 
   ga_clear_strings(&lp->sl_comppat);
@@ -1779,10 +1764,8 @@ void slang_clear(slang_T *lp)
 // Clear the info from the .sug file in "lp".
 void slang_clear_sug(slang_T *lp)
 {
-  xfree(lp->sl_sbyts);
-  lp->sl_sbyts = NULL;
-  xfree(lp->sl_sidxs);
-  lp->sl_sidxs = NULL;
+  XFREE_CLEAR(lp->sl_sbyts);
+  XFREE_CLEAR(lp->sl_sidxs);
   close_spellbuf(lp->sl_sugbuf);
   lp->sl_sugbuf = NULL;
   lp->sl_sugloaded = false;
@@ -1824,9 +1807,11 @@ void count_common_word(slang_T *lp, char_u *word, int len, int count)
   char_u buf[MAXWLEN];
   char_u      *p;
 
-  if (len == -1)
+  if (len == -1) {
     p = word;
-  else {
+  } else if (len >= MAXWLEN) {
+    return;
+  } else {
     STRLCPY(buf, word, len + 1);
     p = buf;
   }
@@ -2255,8 +2240,7 @@ theend:
 static void clear_midword(win_T *wp)
 {
   memset(wp->w_s->b_spell_ismw, 0, 256);
-  xfree(wp->w_s->b_spell_ismw_mb);
-  wp->w_s->b_spell_ismw_mb = NULL;
+  XFREE_CLEAR(wp->w_s->b_spell_ismw_mb);
 }
 
 // Use the "sl_midword" field of language "lp" for buffer "buf".
@@ -2320,6 +2304,7 @@ static int find_region(char_u *rp, char_u *region)
 ///
 /// @returns  Case type of word
 int captype(char_u *word, char_u *end)
+  FUNC_ATTR_NONNULL_ARG(1)
 {
   char_u      *p;
   int c;
@@ -2370,6 +2355,7 @@ int captype(char_u *word, char_u *end)
 // capital.  So that make_case_word() can turn WOrd into Word.
 // Add ALLCAP for "WOrD".
 static int badword_captype(char_u *word, char_u *end)
+  FUNC_ATTR_NONNULL_ALL
 {
   int flags = captype(word, end);
   int c;
@@ -2415,8 +2401,7 @@ void spell_delete_wordlist(void)
     os_remove((char *)int_wordlist);
     int_wordlist_spl(fname);
     os_remove((char *)fname);
-    xfree(int_wordlist);
-    int_wordlist = NULL;
+    XFREE_CLEAR(int_wordlist);
   }
 }
 
@@ -2438,10 +2423,8 @@ void spell_free_all(void)
 
   spell_delete_wordlist();
 
-  xfree(repl_to);
-  repl_to = NULL;
-  xfree(repl_from);
-  repl_from = NULL;
+  XFREE_CLEAR(repl_to);
+  XFREE_CLEAR(repl_from);
 }
 
 // Clear all spelling tables and reload them.
@@ -2637,7 +2620,7 @@ static bool spell_mb_isword_class(int cl, win_T *wp)
   if (wp->w_s->b_cjk)
     // East Asian characters are not considered word characters.
     return cl == 2 || cl == 0x2800;
-  return cl >= 2 && cl != 0x2070 && cl != 0x2080;
+  return cl >= 2 && cl != 0x2070 && cl != 0x2080 && cl != 3;
 }
 
 // Returns true if "p" points to a word character.
@@ -2723,18 +2706,20 @@ int spell_check_sps(void)
     f = 0;
     if (ascii_isdigit(*buf)) {
       s = buf;
-      sps_limit = getdigits_int(&s);
-      if (*s != NUL && !ascii_isdigit(*s))
+      sps_limit = getdigits_int(&s, true, 0);
+      if (*s != NUL && !ascii_isdigit(*s)) {
         f = -1;
-    } else if (STRCMP(buf, "best") == 0)
+      }
+    } else if (STRCMP(buf, "best") == 0) {
       f = SPS_BEST;
-    else if (STRCMP(buf, "fast") == 0)
+    } else if (STRCMP(buf, "fast") == 0) {
       f = SPS_FAST;
-    else if (STRCMP(buf, "double") == 0)
+    } else if (STRCMP(buf, "double") == 0) {
       f = SPS_DOUBLE;
-    else if (STRNCMP(buf, "expr:", 5) != 0
-             && STRNCMP(buf, "file:", 5) != 0)
+    } else if (STRNCMP(buf, "expr:", 5) != 0
+               && STRNCMP(buf, "file:", 5) != 0) {
       f = -1;
+    }
 
     if (f == -1 || (sps_flags != 0 && f != 0)) {
       sps_flags = SPS_BEST;
@@ -2838,10 +2823,8 @@ void spell_suggest(int count)
       smsg(_("Sorry, only %" PRId64 " suggestions"),
            (int64_t)sug.su_ga.ga_len);
   } else {
-    xfree(repl_from);
-    repl_from = NULL;
-    xfree(repl_to);
-    repl_to = NULL;
+    XFREE_CLEAR(repl_from);
+    XFREE_CLEAR(repl_to);
 
     // When 'rightleft' is set the list is drawn right-left.
     cmdmsg_rl = curwin->w_p_rl;
@@ -3285,7 +3268,7 @@ static void spell_suggest_file(suginfo_T *su, char_u *fname)
   char_u cword[MAXWLEN];
 
   // Open the file.
-  fd = mch_fopen((char *)fname, "r");
+  fd = os_fopen((char *)fname, "r");
   if (fd == NULL) {
     EMSG2(_(e_notopen), fname);
     return;
@@ -4523,7 +4506,7 @@ static void suggest_trie_walk(suginfo_T *su, langp_T *lp, char_u *fword, bool so
         sp->ts_state = STATE_SWAP3;
         break;
       }
-      if (c2 != NUL && TRY_DEEPER(su, stack, depth, SCORE_SWAP)) {
+      if (TRY_DEEPER(su, stack, depth, SCORE_SWAP)) {
         go_deeper(stack, depth, SCORE_SWAP);
 #ifdef DEBUG_TRIEWALK
         snprintf(changename[depth], sizeof(changename[0]),
@@ -5306,7 +5289,7 @@ add_sound_suggest (
   }
 
   // Go over the list of good words that produce this soundfold word
-  nrline = ml_get_buf(slang->sl_sugbuf, (linenr_T)(sfwordnr + 1), FALSE);
+  nrline = ml_get_buf(slang->sl_sugbuf, (linenr_T)sfwordnr + 1, false);
   orgnr = 0;
   while (*nrline != NUL) {
     // The wordnr was stored in a minimal nr of bytes as an offset to the
@@ -7100,9 +7083,9 @@ void ex_spelldump(exarg_T *eap)
   spell_dump_compl(NULL, 0, NULL, eap->forceit ? DUMPFLAG_COUNT : 0);
 
   // Delete the empty line that we started with.
-  if (curbuf->b_ml.ml_line_count > 1)
-    ml_delete(curbuf->b_ml.ml_line_count, FALSE);
-
+  if (curbuf->b_ml.ml_line_count > 1) {
+    ml_delete(curbuf->b_ml.ml_line_count, false);
+  }
   redraw_later(NOT_VALID);
 }
 
@@ -7171,7 +7154,7 @@ spell_dump_compl (
   if (do_region && region_names != NULL) {
     if (pat == NULL) {
       vim_snprintf((char *)IObuff, IOSIZE, "/regions=%s", region_names);
-      ml_append(lnum++, IObuff, (colnr_T)0, FALSE);
+      ml_append(lnum++, IObuff, (colnr_T)0, false);
     }
   } else
     do_region = false;
@@ -7185,7 +7168,7 @@ spell_dump_compl (
 
     if (pat == NULL) {
       vim_snprintf((char *)IObuff, IOSIZE, "# file: %s", slang->sl_fname);
-      ml_append(lnum++, IObuff, (colnr_T)0, FALSE);
+      ml_append(lnum++, IObuff, (colnr_T)0, false);
     }
 
     // When matching with a pattern and there are no prefixes only use
@@ -7347,14 +7330,15 @@ static void dump_word(slang_T *slang, char_u *word, char_u *pat, int *dir, int d
       }
     }
 
-    ml_append(lnum, p, (colnr_T)0, FALSE);
+    ml_append(lnum, p, (colnr_T)0, false);
   } else if (((dumpflags & DUMPFLAG_ICASE)
               ? mb_strnicmp(p, pat, STRLEN(pat)) == 0
               : STRNCMP(p, pat, STRLEN(pat)) == 0)
              && ins_compl_add_infercase(p, (int)STRLEN(p),
-                 p_ic, NULL, *dir, 0) == OK)
+                                        p_ic, NULL, *dir, false) == OK) {
     // if dir was BACKWARD then honor it just once
     *dir = FORWARD;
+  }
 }
 
 // For ":spelldump": Find matching prefixes for "word".  Prepend each to

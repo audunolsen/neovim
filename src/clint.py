@@ -7,15 +7,14 @@
 # modification, are permitted provided that the following conditions are
 # met:
 #
-#    * Redistributions of source code must retain the above copyright
-# notice, this list of conditions and the following disclaimer.
-#    * Redistributions in binary form must reproduce the above
-# copyright notice, this list of conditions and the following disclaimer
-# in the documentation and/or other materials provided with the
-# distribution.
-#    * Neither the name of Google Inc. nor the names of its
-# contributors may be used to endorse or promote products derived from
-# this software without specific prior written permission.
+#    * Redistributions of source code must retain the above copyright notice,
+#      this list of conditions and the following disclaimer.
+#    * Redistributions in binary form must reproduce the above copyright
+#      notice, this list of conditions and the following disclaimer in the
+#      documentation and/or other materials provided with the distribution.
+#    * Neither the name of Google Inc. nor the names of its contributors may be
+#      used to endorse or promote products derived from this software without
+#      specific prior written permission.
 #
 # THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
 # "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
@@ -49,7 +48,6 @@ from __future__ import unicode_literals
 
 import codecs
 import copy
-import fileinput
 import getopt
 import math  # for log
 import os
@@ -233,38 +231,6 @@ _ERROR_CATEGORIES = [
 # off by default (i.e., categories that must be enabled by the --filter= flags).
 # All entries here should start with a '-' or '+', as in the --filter= flag.
 _DEFAULT_FILTERS = ['-build/include_alpha']
-
-# We used to check for high-bit characters, but after much discussion we
-# decided those were OK, as long as they were in UTF-8 and didn't represent
-# hard-coded international strings, which belong in a separate i18n file.
-
-# Alternative tokens and their replacements.  For full list, see section 2.5
-# Alternative tokens [lex.digraph] in the C++ standard.
-#
-# Digraphs (such as '%:') are not included here since it's a mess to
-# match those on a word boundary.
-_ALT_TOKEN_REPLACEMENT = {
-    'and': '&&',
-    'bitor': '|',
-    'or': '||',
-    'xor': '^',
-    'compl': '~',
-    'bitand': '&',
-    'and_eq': '&=',
-    'or_eq': '|=',
-    'xor_eq': '^=',
-    'not': '!',
-    'not_eq': '!='
-}
-
-# Compile regular expression that matches all the above keywords.  The "[ =()]"
-# bit is meant to avoid matching these keywords outside of boolean expressions.
-#
-# False positives include C-style multi-line comments and multi-line strings
-# but those have always been troublesome for cpplint.
-_ALT_TOKEN_REPLACEMENT_PATTERN = re.compile(
-    r'[ =()](' + ('|'.join(_ALT_TOKEN_REPLACEMENT.keys())) + r')(?=[ (]|$)')
-
 
 # These constants define types of headers for use with
 # _IncludeState.CheckNextIncludeOrder().
@@ -598,6 +564,7 @@ class _CppLintState(object):
         if fname is None:
             return
         self.record_errors_file = open(fname, 'w')
+
 
 _cpplint_state = _CppLintState()
 
@@ -2156,7 +2123,7 @@ def CheckExpressionAlignment(filename, clean_lines, linenum, error, startpos=0):
                                   'Inner expression indentation should be 4')
             else:
                 if (pos != level_starts[depth][0] + 1
-                    + (level_starts[depth][2] == '{')):
+                        + (level_starts[depth][2] == '{')):
                     if depth not in ignore_error_levels:
                         error(filename, linenum, 'whitespace/alignment', 2,
                               ('Inner expression should be aligned '
@@ -2329,7 +2296,7 @@ def CheckSpacing(filename, clean_lines, linenum, nesting_state, error):
     line = clean_lines.elided[linenum]  # get rid of comments and strings
 
     # Don't try to do spacing checks for operator methods
-    line = re.sub(r'operator(==|!=|<|<<|<=|>=|>>|>)\(', 'operator\(', line)
+    line = re.sub(r'operator(==|!=|<|<<|<=|>=|>>|>)\(', r'operator\(', line)
 
     # We allow no-spaces around = within an if: "if ( (a=Foo()) == 0 )".
     # Otherwise not.  Note we only check for non-spaces on *both* sides;
@@ -2571,6 +2538,8 @@ def CheckSpacing(filename, clean_lines, linenum, nesting_state, error):
                    r'(?<!\bkbtree_t)'
                    r'(?<!\bkbitr_t)'
                    r'(?<!\bPMap)'
+                   r'(?<!\bArrayOf)'
+                   r'(?<!\bDictionaryOf)'
                    r'\((?:const )?(?:struct )?[a-zA-Z_]\w*(?: *\*(?:const)?)*\)'
                    r' +'
                    r'-?(?:\*+|&)?(?:\w+|\+\+|--|\()', cast_line)
@@ -2628,8 +2597,8 @@ def CheckBraces(filename, clean_lines, linenum, error):
         if (not Search(r'[,;:}{(]\s*$', prevline) and
                 not Match(r'\s*#', prevline)):
             error(filename, linenum, 'whitespace/braces', 4,
-                    '{ should almost always be at the end'
-                    ' of the previous line')
+                  '{ should almost always be at the end'
+                  ' of the previous line')
 
     # Brace must appear after function signature, but on the *next* line
     if Match(r'^(?:\w+(?: ?\*+)? )+\w+\(', line):
@@ -2641,9 +2610,13 @@ def CheckBraces(filename, clean_lines, linenum, error):
                   'Brace starting function body must be placed on its own line')
         else:
             func_start_linenum = end_linenum + 1
-            while not clean_lines.lines[func_start_linenum] == '{':
-                attrline = Match(r'^((?!# *define).*?)(?:FUNC_ATTR|FUNC_API|REAL_FATTR)_\w+(?:\(\d+(, \d+)*\))?',
-                                 clean_lines.lines[func_start_linenum])
+            while not clean_lines.lines[func_start_linenum] == "{":
+                attrline = Match(
+                    r'^((?!# *define).*?)'
+                    r'(?:FUNC_ATTR|FUNC_API|REAL_FATTR)_\w+'
+                    r'(?:\(\d+(, \d+)*\))?',
+                    clean_lines.lines[func_start_linenum],
+                )
                 if attrline:
                     if len(attrline.group(1)) != 2:
                         error(filename, func_start_linenum,
@@ -2868,38 +2841,6 @@ def CheckEmptyBlockBody(filename, clean_lines, linenum, error):
                       'Empty loop bodies should use {} or continue')
 
 
-def CheckAltTokens(filename, clean_lines, linenum, error):
-    """Check alternative keywords being used in boolean expressions.
-
-    Args:
-      filename: The name of the current file.
-      clean_lines: A CleansedLines instance containing the file.
-      linenum: The number of the line to check.
-      error: The function to call with any errors found.
-    """
-    line = clean_lines.elided[linenum]
-
-    # Avoid preprocessor lines
-    if Match(r'^\s*#', line):
-        return
-
-    # Last ditch effort to avoid multi-line comments.  This will not help
-    # if the comment started before the current line or ended after the
-    # current line, but it catches most of the false positives.  At least,
-    # it provides a way to workaround this warning for people who use
-    # multi-line comments in preprocessor macros.
-    #
-    # TODO(unknown): remove this once cpplint has better support for
-    # multi-line comments.
-    if line.find('/*') >= 0 or line.find('*/') >= 0:
-        return
-
-    for match in _ALT_TOKEN_REPLACEMENT_PATTERN.finditer(line):
-        error(filename, linenum, 'readability/alt_tokens', 2,
-              'Use operator %s instead of %s' % (
-                  _ALT_TOKEN_REPLACEMENT[match.group(1)], match.group(1)))
-
-
 def GetLineWidth(line):
     """Determines the width of the line in column positions.
 
@@ -3023,7 +2964,6 @@ def CheckStyle(filename, clean_lines, linenum, file_extension, nesting_state,
     CheckBraces(filename, clean_lines, linenum, error)
     CheckEmptyBlockBody(filename, clean_lines, linenum, error)
     CheckSpacing(filename, clean_lines, linenum, nesting_state, error)
-    CheckAltTokens(filename, clean_lines, linenum, error)
 
 
 _RE_PATTERN_INCLUDE_NEW_STYLE = re.compile(r'#include +"[^/]+\.h"')
@@ -3242,11 +3182,12 @@ def CheckLanguage(filename, clean_lines, linenum, file_extension,
     if not Search(r'eval/typval\.[ch]$', filename):
         match = Search(r'(?:\.|->)'
                        r'(?:lv_(?:first|last|refcount|len|watch|idx(?:_item)?'
-                                r'|copylist|lock)'
-                          r'|li_(?:next|prev|tv))\b', line)
+                       r'|copylist|lock)'
+                       r'|li_(?:next|prev|tv))\b', line)
         if match:
             error(filename, linenum, 'runtime/deprecated', 4,
-                  'Accessing list_T internals directly is prohibited (hint: see commit d46e37cb4c71)')
+                  'Accessing list_T internals directly is prohibited '
+                  '(hint: see commit d46e37cb4c71)')
 
     # Check for suspicious usage of "if" like
     # } if (a == b) {

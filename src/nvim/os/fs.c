@@ -24,6 +24,7 @@
 #include "nvim/message.h"
 #include "nvim/assert.h"
 #include "nvim/misc1.h"
+#include "nvim/option.h"
 #include "nvim/path.h"
 #include "nvim/strings.h"
 
@@ -229,7 +230,7 @@ int os_exepath(char *buffer, size_t *size)
 /// Checks if the file `name` is executable.
 ///
 /// @param[in]  name     Filename to check.
-/// @param[out] abspath  Returns resolved executable path, if not NULL.
+/// @param[out,allocated] abspath  Returns resolved exe path, if not NULL.
 /// @param[in] use_path  Also search $PATH.
 ///
 /// @return true if `name` is executable and
@@ -238,27 +239,16 @@ int os_exepath(char *buffer, size_t *size)
 ///   - is absolute.
 ///
 /// @return `false` otherwise.
-bool os_can_exe(const char_u *name, char_u **abspath, bool use_path)
+bool os_can_exe(const char *name, char **abspath, bool use_path)
   FUNC_ATTR_NONNULL_ARG(1)
 {
-  bool no_path = !use_path || path_is_absolute(name);
-  // If the filename is "qualified" (relative or absolute) do not check $PATH.
+  if (!use_path || gettail_dir(name) != name) {
 #ifdef WIN32
-  no_path |= (name[0] == '.'
-              && ((name[1] == '/' || name[1] == '\\')
-                  || (name[1] == '.' && (name[2] == '/' || name[2] == '\\'))));
-#else
-  no_path |= (name[0] == '.'
-              && (name[1] == '/' || (name[1] == '.' && name[2] == '/')));
-#endif
-
-  if (no_path) {
-#ifdef WIN32
-    if (is_executable_ext((char *)name, abspath)) {
+    if (is_executable_ext(name, abspath)) {
 #else
     // Must have path separator, cannot execute files in the current directory.
-    if ((const char_u *)gettail_dir((const char *)name) != name
-        && is_executable((char *)name, abspath)) {
+    if ((use_path || gettail_dir(name) != name)
+        && is_executable(name, abspath)) {
 #endif
       return true;
     } else {
@@ -270,10 +260,13 @@ bool os_can_exe(const char_u *name, char_u **abspath, bool use_path)
 }
 
 /// Returns true if `name` is an executable file.
-static bool is_executable(const char *name, char_u **abspath)
+///
+/// @param[in]            name     Filename to check.
+/// @param[out,allocated] abspath  Returns full exe path, if not NULL.
+static bool is_executable(const char *name, char **abspath)
   FUNC_ATTR_NONNULL_ARG(1)
 {
-  int32_t mode = os_getperm((const char *)name);
+  int32_t mode = os_getperm(name);
 
   if (mode < 0) {
     return false;
@@ -291,7 +284,7 @@ static bool is_executable(const char *name, char_u **abspath)
   const bool ok = (r == 0);
 #endif
   if (ok && abspath != NULL) {
-    *abspath = save_abs_path((char_u *)name);
+    *abspath = save_abs_path(name);
   }
   return ok;
 }
@@ -300,7 +293,7 @@ static bool is_executable(const char *name, char_u **abspath)
 /// Checks if file `name` is executable under any of these conditions:
 /// - extension is in $PATHEXT and `name` is executable
 /// - result of any $PATHEXT extension appended to `name` is executable
-static bool is_executable_ext(char *name, char_u **abspath)
+static bool is_executable_ext(const char *name, char **abspath)
   FUNC_ATTR_NONNULL_ARG(1)
 {
   const bool is_unix_shell = strstr((char *)path_tail(p_sh), "sh") != NULL;
@@ -312,7 +305,8 @@ static bool is_executable_ext(char *name, char_u **abspath)
   if (!pathext) {
     pathext = ".com;.exe;.bat;.cmd";
   }
-  for (const char *ext = pathext; *ext; ext++) {
+  const char *ext = pathext;
+  while (*ext) {
     // If $PATHEXT itself contains dot:
     if (ext[0] == '.' && (ext[1] == '\0' || ext[1] == ENV_SEPCHAR)) {
       if (is_executable(name, abspath)) {
@@ -320,13 +314,17 @@ static bool is_executable_ext(char *name, char_u **abspath)
       }
       // Skip it.
       ext++;
+      if (*ext) {
+        ext++;
+      }
       continue;
     }
 
-    const char *ext_end = xstrchrnul(ext, ENV_SEPCHAR);
-    size_t ext_len = (size_t)(ext_end - ext);
+    const char *ext_end = ext;
+    size_t ext_len =
+      copy_option_part((char_u **)&ext_end, (char_u *)buf_end,
+                       sizeof(os_buf) - (size_t)(buf_end - os_buf), ENV_SEPSTR);
     if (ext_len != 0) {
-      STRLCPY(buf_end, ext, ext_len + 1);
       bool in_pathext = nameext_len == ext_len
         && 0 == mb_strnicmp((char_u *)nameext, (char_u *)ext, ext_len);
 
@@ -347,7 +345,7 @@ static bool is_executable_ext(char *name, char_u **abspath)
 /// @param[out] abspath  Returns resolved executable path, if not NULL.
 ///
 /// @return `true` if `name` is an executable inside `$PATH`.
-static bool is_executable_in_path(const char_u *name, char_u **abspath)
+static bool is_executable_in_path(const char *name, char **abspath)
   FUNC_ATTR_NONNULL_ARG(1)
 {
   const char *path_env = os_getenv("PATH");
@@ -358,13 +356,13 @@ static bool is_executable_in_path(const char_u *name, char_u **abspath)
 #ifdef WIN32
   // Prepend ".;" to $PATH.
   size_t pathlen = strlen(path_env);
-  char *path = memcpy(xmallocz(pathlen + 3), "." ENV_SEPSTR, 2);
+  char *path = memcpy(xmallocz(pathlen + 2), "." ENV_SEPSTR, 2);
   memcpy(path + 2, path_env, pathlen);
 #else
   char *path = xstrdup(path_env);
 #endif
 
-  size_t buf_len = STRLEN(name) + strlen(path) + 2;
+  size_t buf_len = strlen(name) + strlen(path) + 2;
   char *buf = xmalloc(buf_len);
 
   // Walk through all entries in $PATH to check if "name" exists there and
@@ -376,7 +374,7 @@ static bool is_executable_in_path(const char_u *name, char_u **abspath)
 
     // Combine the $PATH segment with `name`.
     STRLCPY(buf, p, e - p + 1);
-    append_path(buf, (char *)name, buf_len);
+    append_path(buf, name, buf_len);
 
 #ifdef WIN32
     if (is_executable_ext(buf, abspath)) {
@@ -406,10 +404,11 @@ end:
 /// calls (read, write, lseek, fcntl, etc.). If the operation fails, a libuv
 /// error code is returned, and no file is created or modified.
 ///
+/// @param path Filename
 /// @param flags Bitwise OR of flags defined in <fcntl.h>
 /// @param mode Permissions for the newly-created file (IGNORED if 'flags' is
 ///        not `O_CREAT` or `O_TMPFILE`), subject to the current umask
-/// @return file descriptor, or libuv error code on failure
+/// @return file descriptor, or negative error code on failure
 int os_open(const char *path, int flags, int mode)
 {
   if (path == NULL) {  // uv_fs_open asserts on NULL. #7561
@@ -418,6 +417,68 @@ int os_open(const char *path, int flags, int mode)
   int r;
   RUN_UV_FS_FUNC(r, uv_fs_open, path, flags, mode, NULL);
   return r;
+}
+
+/// Compatibility wrapper conforming to fopen(3).
+///
+/// Windows: works with UTF-16 filepaths by delegating to libuv (os_open).
+///
+/// Future: remove this, migrate callers to os/fileio.c ?
+///         But file_open_fd does not support O_RDWR yet.
+///
+/// @param path  Filename
+/// @param flags  String flags, one of { r w a r+ w+ a+ rb wb ab }
+/// @return FILE pointer, or NULL on error.
+FILE *os_fopen(const char *path, const char *flags)
+{
+  assert(flags != NULL && strlen(flags) > 0 && strlen(flags) <= 2);
+  int iflags = 0;
+  // Per table in fopen(3) manpage.
+  if (flags[1] == '\0' || flags[1] == 'b') {
+    switch (flags[0]) {
+      case 'r':
+        iflags = O_RDONLY;
+        break;
+      case 'w':
+        iflags = O_WRONLY | O_CREAT | O_TRUNC;
+        break;
+      case 'a':
+        iflags = O_WRONLY | O_CREAT | O_APPEND;
+        break;
+      default:
+        abort();
+    }
+#ifdef WIN32
+    if (flags[1] == 'b') {
+      iflags |= O_BINARY;
+    }
+#endif
+  } else {
+    // char 0 must be one of ('r','w','a').
+    // char 1 is always '+' ('b' is handled above).
+    assert(flags[1] == '+');
+    switch (flags[0]) {
+      case 'r':
+        iflags = O_RDWR;
+        break;
+      case 'w':
+        iflags = O_RDWR | O_CREAT | O_TRUNC;
+        break;
+      case 'a':
+        iflags = O_RDWR | O_CREAT | O_APPEND;
+        break;
+      default:
+        abort();
+    }
+  }
+  // Per open(2) manpage.
+  assert((iflags|O_RDONLY) || (iflags|O_WRONLY) || (iflags|O_RDWR));
+  // Per fopen(3) manpage: default to 0666, it will be umask-adjusted.
+  int fd = os_open(path, iflags, 0666);
+  if (fd < 0) {
+    return NULL;
+  }
+  return fdopen(fd, flags);
 }
 
 /// Sets file descriptor `fd` to close-on-exec.
@@ -643,6 +704,21 @@ ptrdiff_t os_write(const int fd, const char *const buf, const size_t size,
   return (ptrdiff_t)written_bytes;
 }
 
+/// Copies a file from `path` to `new_path`.
+///
+/// @see http://docs.libuv.org/en/v1.x/fs.html#c.uv_fs_copyfile
+///
+/// @param path Path of file to be copied
+/// @param path_new Path of new file
+/// @param flags Bitwise OR of flags defined in <uv.h>
+/// @return 0 on success, or libuv error code on failure.
+int os_copy(const char *path, const char *new_path, int flags)
+{
+  int r;
+  RUN_UV_FS_FUNC(r, uv_fs_copyfile, path, new_path, flags, NULL);
+  return r;
+}
+
 /// Flushes file modifications to disk.
 ///
 /// @param fd the file descriptor of the file to flush to disk.
@@ -697,12 +773,24 @@ int os_setperm(const char *const name, int perm)
   return (r == kLibuvSuccess ? OK : FAIL);
 }
 
-/// Changes the ownership of the file referred to by the open file descriptor.
+/// Changes the owner and group of a file, like chown(2).
 ///
-/// @return `0` on success, a libuv error code on failure.
+/// @return 0 on success, or libuv error code on failure.
 ///
-/// @note If the `owner` or `group` is specified as `-1`, then that ID is not
-/// changed.
+/// @note If `owner` or `group` is -1, then that ID is not changed.
+int os_chown(const char *path, uv_uid_t owner, uv_gid_t group)
+{
+  int r;
+  RUN_UV_FS_FUNC(r, uv_fs_chown, path, owner, group, NULL);
+  return r;
+}
+
+/// Changes the owner and group of the file referred to by the open file
+/// descriptor, like fchown(2).
+///
+/// @return 0 on success, or libuv error code on failure.
+///
+/// @note If `owner` or `group` is -1, then that ID is not changed.
 int os_fchown(int fd, uv_uid_t owner, uv_gid_t group)
 {
   int r;
@@ -717,6 +805,22 @@ bool os_path_exists(const char_u *path)
 {
   uv_stat_t statbuf;
   return os_stat((char *)path, &statbuf) == kLibuvSuccess;
+}
+
+/// Sets file access and modification times.
+///
+/// @see POSIX utime(2)
+///
+/// @param path   File path.
+/// @param atime  Last access time.
+/// @param mtime  Last modification time.
+///
+/// @return 0 on success, or negative error code.
+int os_file_settime(const char *path, double atime, double mtime)
+{
+  int r;
+  RUN_UV_FS_FUNC(r, uv_fs_utime, path, atime, mtime, NULL);
+  return r;
 }
 
 /// Check if a file is readable.
@@ -788,12 +892,12 @@ int os_mkdir_recurse(const char *const dir, int32_t mode,
   // We're done when it's "/" or "c:/".
   const size_t dirlen = strlen(dir);
   char *const curdir = xmemdupz(dir, dirlen);
-  char *const past_head = (char *) get_past_head((char_u *) curdir);
+  char *const past_head = (char *)get_past_head((char_u *)curdir);
   char *e = curdir + dirlen;
   const char *const real_end = e;
   const char past_head_save = *past_head;
-  while (!os_isdir((char_u *) curdir)) {
-    e = (char *) path_tail_with_sep((char_u *) curdir);
+  while (!os_isdir((char_u *)curdir)) {
+    e = (char *)path_tail_with_sep((char_u *)curdir);
     if (e <= past_head) {
       *past_head = NUL;
       break;
@@ -945,7 +1049,7 @@ bool os_fileinfo_fd(int file_descriptor, FileInfo *file_info)
 ///
 /// @return `true` if the two FileInfos represent the same file.
 bool os_fileinfo_id_equal(const FileInfo *file_info_1,
-                           const FileInfo *file_info_2)
+                          const FileInfo *file_info_2)
   FUNC_ATTR_NONNULL_ALL
 {
   return file_info_1->stat.st_ino == file_info_2->stat.st_ino
@@ -1076,12 +1180,10 @@ char *os_resolve_shortcut(const char *fname)
                         &IID_IShellLinkW, (void **)&pslw);
   if (hr == S_OK) {
     wchar_t *p;
-    const int conversion_result = utf8_to_utf16(fname, &p);
-    if (conversion_result != 0) {
-      EMSG2("utf8_to_utf16 failed: %d", conversion_result);
-    }
-
-    if (p != NULL) {
+    const int r = utf8_to_utf16(fname, -1, &p);
+    if (r != 0) {
+      EMSG2("utf8_to_utf16 failed: %d", r);
+    } else if (p != NULL) {
       // Get a pointer to the IPersistFile interface.
       hr = pslw->lpVtbl->QueryInterface(
           pslw, &IID_IPersistFile, (void **)&ppf);
@@ -1106,9 +1208,9 @@ char *os_resolve_shortcut(const char *fname)
       ZeroMemory(wsz, MAX_PATH * sizeof(wchar_t));
       hr = pslw->lpVtbl->GetPath(pslw, wsz, MAX_PATH, &ffdw, 0);
       if (hr == S_OK && wsz[0] != NUL) {
-        const int conversion_result = utf16_to_utf8(wsz, &rfname);
-        if (conversion_result != 0) {
-          EMSG2("utf16_to_utf8 failed: %d", conversion_result);
+        const int r2 = utf16_to_utf8(wsz, -1, &rfname);
+        if (r2 != 0) {
+          EMSG2("utf16_to_utf8 failed: %d", r2);
         }
       }
 

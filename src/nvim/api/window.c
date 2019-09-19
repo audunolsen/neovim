@@ -6,6 +6,8 @@
 #include <stdlib.h>
 #include <limits.h>
 
+#include "nvim/ascii.h"
+#include "nvim/globals.h"
 #include "nvim/api/window.h"
 #include "nvim/api/private/defs.h"
 #include "nvim/api/private/helpers.h"
@@ -13,14 +15,14 @@
 #include "nvim/vim.h"
 #include "nvim/buffer.h"
 #include "nvim/cursor.h"
+#include "nvim/option.h"
 #include "nvim/window.h"
 #include "nvim/screen.h"
 #include "nvim/move.h"
 
-
 /// Gets the current buffer in a window
 ///
-/// @param window   Window handle
+/// @param window   Window handle, or 0 for current window
 /// @param[out] err Error details, if any
 /// @return Buffer handle
 Buffer nvim_win_get_buf(Window window, Error *err)
@@ -37,7 +39,7 @@ Buffer nvim_win_get_buf(Window window, Error *err)
 
 /// Sets the current buffer in a window, without side-effects
 ///
-/// @param window   Window handle
+/// @param window   Window handle, or 0 for current window
 /// @param buffer   Buffer handle
 /// @param[out] err Error details, if any
 void nvim_win_set_buf(Window window, Buffer buffer, Error *err)
@@ -67,12 +69,16 @@ void nvim_win_set_buf(Window window, Buffer buffer, Error *err)
                   buffer);
   }
 
+  // If window is not current, state logic will not validate its cursor.
+  // So do it now.
+  validate_cursor();
+
   restore_win(save_curwin, save_curtab, false);
 }
 
-/// Gets the cursor position in the window
+/// Gets the (1,0)-indexed cursor position in the window. |api-indexing|
 ///
-/// @param window   Window handle
+/// @param window   Window handle, or 0 for current window
 /// @param[out] err Error details, if any
 /// @return (row, col) tuple
 ArrayOf(Integer, 2) nvim_win_get_cursor(Window window, Error *err)
@@ -89,9 +95,9 @@ ArrayOf(Integer, 2) nvim_win_get_cursor(Window window, Error *err)
   return rv;
 }
 
-/// Sets the cursor position in the window
+/// Sets the (1,0)-indexed cursor position in the window. |api-indexing|
 ///
-/// @param window   Window handle
+/// @param window   Window handle, or 0 for current window
 /// @param pos      (row, col) tuple representing the new position
 /// @param[out] err Error details, if any
 void nvim_win_set_cursor(Window window, ArrayOf(Integer, 2) pos, Error *err)
@@ -141,7 +147,7 @@ void nvim_win_set_cursor(Window window, ArrayOf(Integer, 2) pos, Error *err)
 
 /// Gets the window height
 ///
-/// @param window   Window handle
+/// @param window   Window handle, or 0 for current window
 /// @param[out] err Error details, if any
 /// @return Height as a count of rows
 Integer nvim_win_get_height(Window window, Error *err)
@@ -159,7 +165,7 @@ Integer nvim_win_get_height(Window window, Error *err)
 /// Sets the window height. This will only succeed if the screen is split
 /// horizontally.
 ///
-/// @param window   Window handle
+/// @param window   Window handle, or 0 for current window
 /// @param height   Height as a count of rows
 /// @param[out] err Error details, if any
 void nvim_win_set_height(Window window, Integer height, Error *err)
@@ -186,7 +192,7 @@ void nvim_win_set_height(Window window, Integer height, Error *err)
 
 /// Gets the window width
 ///
-/// @param window   Window handle
+/// @param window   Window handle, or 0 for current window
 /// @param[out] err Error details, if any
 /// @return Width as a count of columns
 Integer nvim_win_get_width(Window window, Error *err)
@@ -204,7 +210,7 @@ Integer nvim_win_get_width(Window window, Error *err)
 /// Sets the window width. This will only succeed if the screen is split
 /// vertically.
 ///
-/// @param window   Window handle
+/// @param window   Window handle, or 0 for current window
 /// @param width    Width as a count of columns
 /// @param[out] err Error details, if any
 void nvim_win_set_width(Window window, Integer width, Error *err)
@@ -231,7 +237,7 @@ void nvim_win_set_width(Window window, Integer width, Error *err)
 
 /// Gets a window-scoped (w:) variable
 ///
-/// @param window   Window handle
+/// @param window   Window handle, or 0 for current window
 /// @param name     Variable name
 /// @param[out] err Error details, if any
 /// @return Variable value
@@ -249,7 +255,7 @@ Object nvim_win_get_var(Window window, String name, Error *err)
 
 /// Sets a window-scoped (w:) variable
 ///
-/// @param window   Window handle
+/// @param window   Window handle, or 0 for current window
 /// @param name     Variable name
 /// @param value    Variable value
 /// @param[out] err Error details, if any
@@ -267,7 +273,7 @@ void nvim_win_set_var(Window window, String name, Object value, Error *err)
 
 /// Removes a window-scoped (w:) variable
 ///
-/// @param window   Window handle
+/// @param window   Window handle, or 0 for current window
 /// @param name     Variable name
 /// @param[out] err Error details, if any
 void nvim_win_del_var(Window window, String name, Error *err)
@@ -286,7 +292,7 @@ void nvim_win_del_var(Window window, String name, Error *err)
 ///
 /// @deprecated
 ///
-/// @param window   Window handle
+/// @param window   Window handle, or 0 for current window
 /// @param name     Variable name
 /// @param value    Variable value
 /// @param[out] err Error details, if any
@@ -309,7 +315,7 @@ Object window_set_var(Window window, String name, Object value, Error *err)
 ///
 /// @deprecated
 ///
-/// @param window   Window handle
+/// @param window   Window handle, or 0 for current window
 /// @param name     variable name
 /// @param[out] err Error details, if any
 /// @return Old value
@@ -326,7 +332,7 @@ Object window_del_var(Window window, String name, Error *err)
 
 /// Gets a window option value
 ///
-/// @param window   Window handle
+/// @param window   Window handle, or 0 for current window
 /// @param name     Option name
 /// @param[out] err Error details, if any
 /// @return Option value
@@ -346,7 +352,7 @@ Object nvim_win_get_option(Window window, String name, Error *err)
 /// works if there's a global fallback)
 ///
 /// @param channel_id
-/// @param window   Window handle
+/// @param window   Window handle, or 0 for current window
 /// @param name     Option name
 /// @param value    Option value
 /// @param[out] err Error details, if any
@@ -365,7 +371,7 @@ void nvim_win_set_option(uint64_t channel_id, Window window,
 
 /// Gets the window position in display cells. First position is zero.
 ///
-/// @param window   Window handle
+/// @param window   Window handle, or 0 for current window
 /// @param[out] err Error details, if any
 /// @return (row, col) tuple with the window position
 ArrayOf(Integer, 2) nvim_win_get_position(Window window, Error *err)
@@ -384,7 +390,7 @@ ArrayOf(Integer, 2) nvim_win_get_position(Window window, Error *err)
 
 /// Gets the window tabpage
 ///
-/// @param window   Window handle
+/// @param window   Window handle, or 0 for current window
 /// @param[out] err Error details, if any
 /// @return Tabpage that contains the window
 Tabpage nvim_win_get_tabpage(Window window, Error *err)
@@ -402,7 +408,7 @@ Tabpage nvim_win_get_tabpage(Window window, Error *err)
 
 /// Gets the window number
 ///
-/// @param window   Window handle
+/// @param window   Window handle, or 0 for current window
 /// @param[out] err Error details, if any
 /// @return Window number
 Integer nvim_win_get_number(Window window, Error *err)
@@ -423,7 +429,7 @@ Integer nvim_win_get_number(Window window, Error *err)
 
 /// Checks if a window is valid
 ///
-/// @param window Window handle
+/// @param window Window handle, or 0 for current window
 /// @return true if the window is valid, false otherwise
 Boolean nvim_win_is_valid(Window window)
   FUNC_API_SINCE(1)
@@ -435,18 +441,17 @@ Boolean nvim_win_is_valid(Window window)
 }
 
 
-/// Configure window position. Currently this is only used to configure
-/// floating and external windows (including changing a split window to these
-/// types).
-///
-/// See documentation at |nvim_open_win()|, for the meaning of parameters.
+/// Configures window layout. Currently only for floating and external windows
+/// (including changing a split window to those layouts).
 ///
 /// When reconfiguring a floating window, absent option keys will not be
-/// changed. The following restriction apply: `row`, `col` and `relative`
-/// must be reconfigured together. Only changing a subset of these is an error.
+/// changed.  `row`/`col` and `relative` must be reconfigured together.
 ///
-/// @param      window  Window handle
-/// @param      config  Dictionary of window configuration
+/// @see |nvim_open_win()|
+///
+/// @param      window  Window handle, or 0 for current window
+/// @param      config  Map defining the window configuration,
+///                     see |nvim_open_win()|
 /// @param[out] err     Error details, if any
 void nvim_win_set_config(Window window, Dictionary config, Error *err)
   FUNC_API_SINCE(6)
@@ -462,8 +467,6 @@ void nvim_win_set_config(Window window, Dictionary config, Error *err)
   if (!parse_float_config(config, &fconfig, !new_float, err)) {
     return;
   }
-  fconfig.height = fconfig.height > 0 ? fconfig.height : win->w_height;
-  fconfig.width = fconfig.width > 0 ? fconfig.width : win->w_width;
   if (new_float) {
     if (!win_new_float(win, fconfig, err)) {
       return;
@@ -473,18 +476,21 @@ void nvim_win_set_config(Window window, Dictionary config, Error *err)
     win_config_float(win, fconfig);
     win->w_pos_changed = true;
   }
+  if (fconfig.style == kWinStyleMinimal) {
+    win_set_minimal_style(win);
+    didset_window_options(win);
+  }
 }
 
-/// Return window configuration.
+/// Gets window configuration.
 ///
-/// Return a dictionary containing the same config that can be given to
-/// |nvim_open_win()|.
+/// The returned value may be given to |nvim_open_win()|.
 ///
-/// `relative` will be an empty string for normal windows.
+/// `relative` is empty for normal windows.
 ///
-/// @param      window Window handle
+/// @param      window Window handle, or 0 for current window
 /// @param[out] err Error details, if any
-/// @return     Window configuration
+/// @return     Map defining the window configuration, see |nvim_open_win()|
 Dictionary nvim_win_get_config(Window window, Error *err)
   FUNC_API_SINCE(6)
 {
@@ -495,36 +501,41 @@ Dictionary nvim_win_get_config(Window window, Error *err)
     return rv;
   }
 
-  PUT(rv, "width", INTEGER_OBJ(wp->w_float_config.width));
-  PUT(rv, "height", INTEGER_OBJ(wp->w_float_config.height));
-  PUT(rv, "focusable", BOOLEAN_OBJ(wp->w_float_config.focusable));
-  PUT(rv, "external", BOOLEAN_OBJ(wp->w_float_config.external));
-  PUT(rv, "anchor", STRING_OBJ(cstr_to_string(
-      float_anchor_str[wp->w_float_config.anchor])));
+  FloatConfig *config = &wp->w_float_config;
 
-  if (wp->w_float_config.relative == kFloatRelativeWindow) {
-    PUT(rv, "win", INTEGER_OBJ(wp->w_float_config.window));
+  PUT(rv, "focusable", BOOLEAN_OBJ(config->focusable));
+  PUT(rv, "external", BOOLEAN_OBJ(config->external));
+
+  if (wp->w_floating) {
+    PUT(rv, "width", INTEGER_OBJ(config->width));
+    PUT(rv, "height", INTEGER_OBJ(config->height));
+    if (!config->external) {
+      if (config->relative == kFloatRelativeWindow) {
+        PUT(rv, "win", INTEGER_OBJ(config->window));
+        if (config->bufpos.lnum >= 0) {
+          Array pos = ARRAY_DICT_INIT;
+          ADD(pos, INTEGER_OBJ(config->bufpos.lnum));
+          ADD(pos, INTEGER_OBJ(config->bufpos.col));
+          PUT(rv, "bufpos", ARRAY_OBJ(pos));
+        }
+      }
+      PUT(rv, "anchor", STRING_OBJ(cstr_to_string(
+          float_anchor_str[config->anchor])));
+      PUT(rv, "row", FLOAT_OBJ(config->row));
+      PUT(rv, "col", FLOAT_OBJ(config->col));
+    }
   }
 
-  if (wp->w_float_config.external) {
-    return rv;
-  }
-
-  PUT(rv, "row", FLOAT_OBJ(wp->w_float_config.row));
-  PUT(rv, "col", FLOAT_OBJ(wp->w_float_config.col));
-
-  const char *rel =
-    wp->w_floating ? float_relative_str[wp->w_float_config.relative] : "";
+  const char *rel = (wp->w_floating && !config->external
+                     ? float_relative_str[config->relative] : "");
   PUT(rv, "relative", STRING_OBJ(cstr_to_string(rel)));
 
   return rv;
 }
 
-/// Close a window.
+/// Closes the window (like |:close| with a |window-ID|).
 ///
-/// This is equivalent to |:close| with count except that it takes a window id.
-///
-/// @param window   Window handle
+/// @param window   Window handle, or 0 for current window
 /// @param force    Behave like `:close!` The last window of a buffer with
 ///                 unwritten changes can be closed. The buffer will become
 ///                 hidden, even if 'hidden' is not set.
@@ -536,8 +547,17 @@ void nvim_win_close(Window window, Boolean force, Error *err)
   if (!win) {
     return;
   }
-  tabpage_T *tabpage = win_find_tabpage(win);
 
+  if (cmdwin_type != 0) {
+    if (win == curwin) {
+      cmdwin_result = Ctrl_C;
+    } else {
+      api_set_error(err, kErrorTypeException, "%s", _(e_cmdwin));
+    }
+    return;
+  }
+
+  tabpage_T *tabpage = win_find_tabpage(win);
   TryState tstate;
   try_enter(&tstate);
   ex_win_close(force, win, tabpage == curtab ? NULL : tabpage);

@@ -13,7 +13,6 @@
 #endif
 
 #define PROJECT_NAME "@PROJECT_NAME@"
-#define LOCALE_INSTALL_DIR "@CMAKE_INSTALL_FULL_LOCALEDIR@"
 
 #cmakedefine HAVE__NSGETENVIRON
 #cmakedefine HAVE_FD_CLOEXEC
@@ -22,15 +21,12 @@
 #cmakedefine HAVE_GETPWNAM
 #cmakedefine HAVE_GETPWUID
 #cmakedefine HAVE_ICONV
-#cmakedefine HAVE_ICONV_H
 #cmakedefine HAVE_LANGINFO_H
 #cmakedefine HAVE_LOCALE_H
 #cmakedefine HAVE_NL_LANGINFO_CODESET
 #cmakedefine HAVE_NL_MSG_CAT_CNTR
 #cmakedefine HAVE_PWD_H
 #cmakedefine HAVE_READLINK
-// TODO: add proper cmake check
-// #define HAVE_SELINUX 1
 #cmakedefine HAVE_SETPGID
 #cmakedefine HAVE_SETSID
 #cmakedefine HAVE_SIGACTION
@@ -40,9 +36,6 @@
 #cmakedefine HAVE_SYS_UTSNAME_H
 #cmakedefine HAVE_SYS_WAIT_H
 #cmakedefine HAVE_TERMIOS_H
-#cmakedefine HAVE_UTIME
-#cmakedefine HAVE_UTIME_H
-#cmakedefine HAVE_UTIMES
 #cmakedefine HAVE_WORKING_LIBINTL
 #cmakedefine HAVE_WSL
 #cmakedefine UNIX

@@ -79,17 +79,15 @@
 #include <inttypes.h>
 #include <limits.h>
 #include <stdbool.h>
-#include <stdint.h>
 #include <string.h>
 #include <fcntl.h>
 
-#include "nvim/vim.h"
+#include "nvim/buffer.h"
 #include "nvim/ascii.h"
+#include "nvim/change.h"
 #include "nvim/undo.h"
-#include "nvim/macros.h"
 #include "nvim/cursor.h"
 #include "nvim/edit.h"
-#include "nvim/eval.h"
 #include "nvim/fileio.h"
 #include "nvim/fold.h"
 #include "nvim/buffer_updates.h"
@@ -102,8 +100,6 @@
 #include "nvim/option.h"
 #include "nvim/os_unix.h"
 #include "nvim/path.h"
-#include "nvim/quickfix.h"
-#include "nvim/screen.h"
 #include "nvim/sha256.h"
 #include "nvim/state.h"
 #include "nvim/strings.h"
@@ -718,8 +714,7 @@ char *u_get_undo_file_name(const char *const buf_ffname, const bool reading)
         && (!reading || os_path_exists((char_u *)undo_file_name))) {
       break;
     }
-    xfree(undo_file_name);
-    undo_file_name = NULL;
+    XFREE_CLEAR(undo_file_name);
   }
 
   xfree(munged_name);
@@ -1135,8 +1130,9 @@ void u_write_undo(const char *const name, const bool forceit, buf_T *const buf,
   /* If there is no undo information at all, quit here after deleting any
    * existing undo file. */
   if (buf->b_u_numhead == 0 && buf->b_u_line_ptr == NULL) {
-    if (p_verbose > 0)
-      verb_msg((char_u *)_("Skipping undo file write, nothing to undo"));
+    if (p_verbose > 0) {
+      verb_msg(_("Skipping undo file write, nothing to undo"));
+    }
     goto theend;
   }
 
@@ -1172,10 +1168,6 @@ void u_write_undo(const char *const name, const bool forceit, buf_T *const buf,
       && os_fchown(fd, (uv_uid_t)-1, (uv_gid_t)file_info_old.stat.st_gid)) {
     os_setperm(file_name, (perm & 0707) | ((perm & 07) << 3));
   }
-# ifdef HAVE_SELINUX
-  if (buf->b_ffname != NULL)
-    mch_copy_sec(buf->b_ffname, file_name);
-# endif
 #endif
 
   fp = fdopen(fd, "w");
@@ -1307,7 +1299,7 @@ void u_read_undo(char *name, char_u *hash, char_u *orig_name)
     verbose_leave();
   }
 
-  FILE *fp = mch_fopen(file_name, "r");
+  FILE *fp = os_fopen(file_name, "r");
   if (fp == NULL) {
     if (name != NULL || p_verbose > 0) {
       EMSG2(_("E822: Cannot open undo file for reading: %s"), file_name);
@@ -1822,7 +1814,7 @@ void undo_time(long step, bool sec, bool file, bool absolute)
   u_header_T      *uhp = NULL;
   u_header_T      *last;
   int mark;
-  int nomark;
+  int nomark = 0;  // shut up compiler
   int round;
   bool dosec = sec;
   bool dofile = file;
@@ -2154,7 +2146,7 @@ static void u_undoredo(int undo, bool do_buf_event)
   int new_flags;
   fmark_T namedm[NMARKS];
   visualinfo_T visualinfo;
-  int empty_buffer;                         /* buffer became empty */
+  bool empty_buffer;                        // buffer became empty
   u_header_T  *curhead = curbuf->b_u_curhead;
 
   /* Don't want autocommands using the undo structures here, they are
@@ -2221,7 +2213,7 @@ static void u_undoredo(int undo, bool do_buf_event)
       }
     }
 
-    empty_buffer = FALSE;
+    empty_buffer = false;
 
     /* delete the lines between top and bot and save them in newarray */
     if (oldsize > 0) {
@@ -2232,9 +2224,10 @@ static void u_undoredo(int undo, bool do_buf_event)
         newarray[i] = u_save_line(lnum);
         /* remember we deleted the last line in the buffer, and a
          * dummy empty line will be inserted */
-        if (curbuf->b_ml.ml_line_count == 1)
-          empty_buffer = TRUE;
-        ml_delete(lnum, FALSE);
+        if (curbuf->b_ml.ml_line_count == 1) {
+          empty_buffer = true;
+        }
+        ml_delete(lnum, false);
       }
     } else
       newarray = NULL;
@@ -2249,7 +2242,7 @@ static void u_undoredo(int undo, bool do_buf_event)
         if (empty_buffer && lnum == 0) {
           ml_replace((linenr_T)1, uep->ue_array[i], true);
         } else {
-          ml_append(lnum, uep->ue_array[i], (colnr_T)0, FALSE);
+          ml_append(lnum, uep->ue_array[i], (colnr_T)0, false);
         }
         xfree(uep->ue_array[i]);
       }
@@ -2300,13 +2293,13 @@ static void u_undoredo(int undo, bool do_buf_event)
   if (old_flags & UH_CHANGED) {
     changed();
   } else {
-    unchanged(curbuf, FALSE);
+    unchanged(curbuf, false, true);
   }
 
   // because the calls to changed()/unchanged() above will bump changedtick
   // again, we need to send a nvim_buf_lines_event with just the new value of
   // b:changedtick
-  if (do_buf_event && kv_size(curbuf->update_channels)) {
+  if (do_buf_event) {
     buf_updates_changedtick(curbuf);
   }
 
@@ -2452,7 +2445,9 @@ static void u_undo_end(
     }
   }
 
-  smsg(_("%" PRId64 " %s; %s #%" PRId64 "  %s"),
+  smsg_attr_keep(
+      0,
+      _("%" PRId64 " %s; %s #%" PRId64 "  %s"),
       u_oldcount < 0 ? (int64_t)-u_oldcount : (int64_t)u_oldcount,
       _(msgstr),
       did_undo ? _("before") : _("after"),
@@ -2585,9 +2580,13 @@ static void u_add_time(char_u *buf, size_t buflen, time_t tt)
     else
       /* longer ago */
       (void)strftime((char *)buf, buflen, "%Y/%m/%d %H:%M:%S", &curtime);
-  } else
-  vim_snprintf((char *)buf, buflen, _("%" PRId64 " seconds ago"),
-      (int64_t)(time(NULL) - tt));
+  } else {
+    int64_t seconds = time(NULL) - tt;
+    vim_snprintf((char *)buf, buflen,
+                 NGETTEXT("%" PRId64 " second ago",
+                          "%" PRId64 " seconds ago", (uint32_t)seconds),
+                 seconds);
+  }
 }
 
 /*
@@ -2887,8 +2886,7 @@ void u_saveline(linenr_T lnum)
 void u_clearline(void)
 {
   if (curbuf->b_u_line_ptr != NULL) {
-    xfree(curbuf->b_u_line_ptr);
-    curbuf->b_u_line_ptr = NULL;
+    XFREE_CLEAR(curbuf->b_u_line_ptr);
     curbuf->b_u_line_lnum = 0;
   }
 }
@@ -2963,19 +2961,29 @@ static char_u *u_save_line(linenr_T lnum)
 ///
 /// @return true if the buffer has changed
 bool bufIsChanged(buf_T *buf)
+  FUNC_ATTR_NONNULL_ALL FUNC_ATTR_WARN_UNUSED_RESULT
 {
   return !bt_dontwrite(buf) && (buf->b_changed || file_ff_differs(buf, true));
 }
 
-/// Check if the 'modified' flag is set, or 'ff' has changed (only need to
-/// check the first character, because it can only be "dos", "unix" or "mac").
-/// "nofile" and "scratch" type buffers are considered to always be unchanged.
-///
+// Return true if any buffer has changes.  Also buffers that are not written.
+bool anyBufIsChanged(void)
+  FUNC_ATTR_WARN_UNUSED_RESULT
+{
+  FOR_ALL_BUFFERS(buf) {
+    if (bufIsChanged(buf)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/// @see bufIsChanged
 /// @return true if the current buffer has changed
 bool curbufIsChanged(void)
+  FUNC_ATTR_WARN_UNUSED_RESULT
 {
-  return (!bt_dontwrite(curbuf)
-          && (curbuf->b_changed || file_ff_differs(curbuf, true)));
+  return bufIsChanged(curbuf);
 }
 
 /// Append the list of undo blocks to a newly allocated list

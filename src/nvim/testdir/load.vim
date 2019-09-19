@@ -1,11 +1,13 @@
+" Also used by: test/functional/helpers.lua
+
 function! s:load_factor() abort
   let timeout = 200
   let times = []
 
   for _ in range(5)
     let g:val = 0
-    call timer_start(timeout, {-> nvim_set_var('val', 1)})
     let start = reltime()
+    call timer_start(timeout, {-> nvim_set_var('val', 1)})
     while 1
       sleep 10m
       if g:val == 1
@@ -23,8 +25,8 @@ function! s:load_factor() abort
 endfunction
 
 " Compute load factor only once.
-let s:load_factor = s:load_factor()
+let g:test_load_factor = s:load_factor()
 
 function! LoadAdjust(num) abort
-  return float2nr(ceil(a:num * s:load_factor))
+  return float2nr(ceil(a:num * g:test_load_factor))
 endfunction

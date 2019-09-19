@@ -9,6 +9,7 @@
 
 #include "nvim/vim.h"
 #include "nvim/log.h"
+#include "nvim/aucmd.h"
 #include "nvim/ui.h"
 #include "nvim/charset.h"
 #include "nvim/cursor.h"
@@ -141,6 +142,17 @@ bool ui_rgb_attached(void)
   return false;
 }
 
+/// Returns true if any UI requested `override=true`.
+bool ui_override(void)
+{
+  for (size_t i = 1; i < ui_count; i++) {
+    if (uis[i]->override) {
+      return true;
+    }
+  }
+  return false;
+}
+
 bool ui_active(void)
 {
   return ui_count > 1;
@@ -163,7 +175,7 @@ void ui_refresh(void)
   }
 
   if (updating_screen) {
-    ui_schedule_refresh();
+    deferred_refresh_event(NULL);
     return;
   }
 
@@ -173,12 +185,13 @@ void ui_refresh(void)
     ext_widgets[i] = true;
   }
 
+  bool inclusive = ui_override();
   for (size_t i = 0; i < ui_count; i++) {
     UI *ui = uis[i];
     width = MIN(ui->width, width);
     height = MIN(ui->height, height);
     for (UIExtension j = 0; (int)j < kUIExtCount; j++) {
-      ext_widgets[j] &= ui->ui_ext[j];
+      ext_widgets[j] &= (ui->ui_ext[j] || inclusive);
     }
   }
 
@@ -209,6 +222,19 @@ void ui_refresh(void)
   ui_cursor_shape();
 }
 
+int ui_pum_get_height(void)
+{
+  int pum_height = 0;
+  for (size_t i = 1; i < ui_count; i++) {
+    int ui_pum_height = uis[i]->pum_height;
+    if (ui_pum_height) {
+      pum_height =
+        pum_height != 0 ? MIN(pum_height, ui_pum_height) : ui_pum_height;
+    }
+  }
+  return pum_height;
+}
+
 static void ui_refresh_event(void **argv)
 {
   ui_refresh();
@@ -216,7 +242,11 @@ static void ui_refresh_event(void **argv)
 
 void ui_schedule_refresh(void)
 {
-  loop_schedule(&main_loop, event_create(ui_refresh_event, 0));
+  loop_schedule_fast(&main_loop, event_create(deferred_refresh_event, 0));
+}
+static void deferred_refresh_event(void **argv)
+{
+  multiqueue_put(resize_events, ui_refresh_event, 0);
 }
 
 void ui_default_colors_set(void)
@@ -239,7 +269,7 @@ void ui_busy_stop(void)
   }
 }
 
-void ui_attach_impl(UI *ui)
+void ui_attach_impl(UI *ui, uint64_t chanid)
 {
   if (ui_count == MAX_UI_COUNT) {
     abort();
@@ -263,9 +293,14 @@ void ui_attach_impl(UI *ui)
     ui_send_all_hls(ui);
   }
   ui_refresh();
+
+  bool is_compositor = (ui == uis[0]);
+  if (!is_compositor) {
+    do_autocmd_uienter(chanid, true);
+  }
 }
 
-void ui_detach_impl(UI *ui)
+void ui_detach_impl(UI *ui, uint64_t chanid)
 {
   size_t shift_index = MAX_UI_COUNT;
 
@@ -297,6 +332,8 @@ void ui_detach_impl(UI *ui)
   if (!ui->ui_ext[kUIMultigrid] && !ui->ui_ext[kUIFloatDebug]) {
     ui_comp_detach(ui);
   }
+
+  do_autocmd_uienter(chanid, false);
 }
 
 void ui_set_ext_option(UI *ui, UIExtension ext, bool active)
@@ -317,6 +354,7 @@ void ui_set_ext_option(UI *ui, UIExtension ext, bool active)
 void ui_line(ScreenGrid *grid, int row, int startcol, int endcol, int clearcol,
              int clearattr, bool wrap)
 {
+  assert(0 <= row && row < grid->Rows);
   LineFlags flags = wrap ? kLineFlagWrap : 0;
   if (startcol == -1) {
     startcol = 0;
@@ -329,15 +367,15 @@ void ui_line(ScreenGrid *grid, int row, int startcol, int endcol, int clearcol,
                    flags, (const schar_T *)grid->chars + off,
                    (const sattr_T *)grid->attrs + off);
 
-  if (p_wd) {  // 'writedelay': flush & delay each time.
-    int old_row = cursor_row, old_col = cursor_col;
-    handle_T old_grid = cursor_grid_handle;
+  // 'writedelay': flush & delay each time.
+  if (p_wd && !(rdb_flags & RDB_COMPOSITOR)) {
     // If 'writedelay' is active, set the cursor to indicate what was drawn.
-    ui_grid_cursor_goto(grid->handle, row, MIN(clearcol, (int)Columns-1));
-    ui_flush();
+    ui_call_grid_cursor_goto(grid->handle, row,
+                             MIN(clearcol, (int)grid->Columns-1));
+    ui_call_flush();
     uint64_t wd = (uint64_t)labs(p_wd);
     os_microdelay(wd * 1000u, true);
-    ui_grid_cursor_goto(old_grid, old_row, old_col);
+    pending_cursor_update = true;  // restore the cursor later
   }
 }
 
@@ -360,6 +398,14 @@ void ui_grid_cursor_goto(handle_T grid_handle, int new_row, int new_col)
   pending_cursor_update = true;
 }
 
+/// moving the cursor grid will implicitly move the cursor
+void ui_check_cursor_grid(handle_T grid_handle)
+{
+  if (cursor_grid_handle == grid_handle) {
+    pending_cursor_update = true;
+  }
+}
+
 void ui_mode_info_set(void)
 {
   pending_mode_info_update = true;
@@ -380,6 +426,7 @@ void ui_flush(void)
   cmdline_ui_flush();
   win_ui_flush_positions();
   msg_ext_ui_flush();
+  msg_scroll_flush();
 
   if (pending_cursor_update) {
     ui_call_grid_cursor_goto(cursor_grid_handle, cursor_row, cursor_col);
@@ -431,14 +478,13 @@ Array ui_array(void)
     PUT(info, "width", INTEGER_OBJ(ui->width));
     PUT(info, "height", INTEGER_OBJ(ui->height));
     PUT(info, "rgb", BOOLEAN_OBJ(ui->rgb));
+    PUT(info, "override", BOOLEAN_OBJ(ui->override));
     for (UIExtension j = 0; j < kUIExtCount; j++) {
       if (ui_ext_names[j][0] != '_' || ui->ui_ext[j]) {
         PUT(info, ui_ext_names[j], BOOLEAN_OBJ(ui->ui_ext[j]));
       }
     }
-    if (ui->inspect) {
-      ui->inspect(ui, &info);
-    }
+    ui->inspect(ui, &info);
     ADD(all_uis, DICTIONARY_OBJ(info));
   }
   return all_uis;

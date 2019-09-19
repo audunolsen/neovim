@@ -37,6 +37,7 @@ static int pum_height;              // nr of displayed pum items
 static int pum_width;               // width of displayed pum items
 static int pum_base_width;          // width of pum items base
 static int pum_kind_width;          // width of pum items kind column
+static int pum_extra_width;         // width of extra stuff
 static int pum_scrollbar;           // TRUE when scrollbar present
 
 static int pum_anchor_grid;         // grid where position is defined
@@ -55,6 +56,32 @@ static bool pum_invalid = false;  // the screen was just cleared
 #define PUM_DEF_HEIGHT 10
 #define PUM_DEF_WIDTH  15
 
+static void pum_compute_size(void)
+{
+  // Compute the width of the widest match and the widest extra.
+  pum_base_width = 0;
+  pum_kind_width = 0;
+  pum_extra_width = 0;
+  for (int i = 0; i < pum_size; i++) {
+    int w = vim_strsize(pum_array[i].pum_text);
+    if (pum_base_width < w) {
+      pum_base_width = w;
+    }
+    if (pum_array[i].pum_kind != NULL) {
+      w = vim_strsize(pum_array[i].pum_kind) + 1;
+      if (pum_kind_width < w) {
+        pum_kind_width = w;
+      }
+    }
+    if (pum_array[i].pum_extra != NULL) {
+      w = vim_strsize(pum_array[i].pum_extra) + 1;
+      if (pum_extra_width < w) {
+        pum_extra_width = w;
+      }
+    }
+  }
+}
+
 /// Show the popup menu with items "array[size]".
 /// "array" must remain valid until pum_undisplay() is called!
 /// When possible the leftmost character is aligned with screen column "col".
@@ -70,12 +97,7 @@ static bool pum_invalid = false;  // the screen was just cleared
 void pum_display(pumitem_T *array, int size, int selected, bool array_changed,
                  int cmd_startcol)
 {
-  int w;
   int def_width;
-  int max_width;
-  int kind_width;
-  int extra_width;
-  int i;
   int context_lines;
   int above_row;
   int below_row;
@@ -124,7 +146,7 @@ void pum_display(pumitem_T *array, int size, int selected, bool array_changed,
     if (pum_external) {
       if (array_changed) {
         Array arr = ARRAY_DICT_INIT;
-        for (i = 0; i < size; i++) {
+        for (int i = 0; i < size; i++) {
           Array item = ARRAY_DICT_INIT;
           ADD(item, STRING_OBJ(cstr_to_string((char *)array[i].pum_text)));
           ADD(item, STRING_OBJ(cstr_to_string((char *)array[i].pum_kind)));
@@ -135,14 +157,11 @@ void pum_display(pumitem_T *array, int size, int selected, bool array_changed,
         ui_call_popupmenu_show(arr, selected, row, col, pum_anchor_grid);
       } else {
         ui_call_popupmenu_select(selected);
+        return;
       }
-      return;
     }
 
     def_width = PUM_DEF_WIDTH;
-    max_width = 0;
-    kind_width = 0;
-    extra_width = 0;
 
     win_T *pvwin = NULL;
     FOR_ALL_WINDOWS_IN_TAB(wp, curtab) {
@@ -237,33 +256,14 @@ void pum_display(pumitem_T *array, int size, int selected, bool array_changed,
         pum_height = row - above_row;
       }
     }
-
-    // Compute the width of the widest match and the widest extra.
-    for (i = 0; i < size; i++) {
-      w = vim_strsize(array[i].pum_text);
-
-      if (max_width < w) {
-        max_width = w;
-      }
-
-      if (array[i].pum_kind != NULL) {
-        w = vim_strsize(array[i].pum_kind) + 1;
-
-        if (kind_width < w) {
-          kind_width = w;
-        }
-      }
-
-      if (array[i].pum_extra != NULL) {
-        w = vim_strsize(array[i].pum_extra) + 1;
-
-        if (extra_width < w) {
-          extra_width = w;
-        }
-      }
+    if (pum_external) {
+      return;
     }
-    pum_base_width = max_width;
-    pum_kind_width = kind_width;
+
+    pum_array = array;
+    pum_size = size;
+    pum_compute_size();
+    int max_width = pum_base_width;
 
     // if there are more items than room we need a scrollbar
     if (pum_height < size) {
@@ -290,9 +290,9 @@ void pum_display(pumitem_T *array, int size, int selected, bool array_changed,
         pum_width = (int)(Columns - pum_col - pum_scrollbar);
       }
 
-      if ((pum_width > max_width + kind_width + extra_width + 1)
+      if ((pum_width > max_width + pum_kind_width + pum_extra_width + 1)
           && (pum_width > PUM_DEF_WIDTH)) {
-        pum_width = max_width + kind_width + extra_width + 1;
+        pum_width = max_width + pum_kind_width + pum_extra_width + 1;
 
         if (pum_width < PUM_DEF_WIDTH) {
           pum_width = PUM_DEF_WIDTH;
@@ -323,9 +323,6 @@ void pum_display(pumitem_T *array, int size, int selected, bool array_changed,
       }
       pum_width = max_width - pum_scrollbar;
     }
-
-    pum_array = array;
-    pum_size = size;
 
     // Set selected item and redraw.  If the window size changed need to redo
     // the positioning.  Limit this to two times, when there is not much
@@ -376,6 +373,7 @@ void pum_redraw(void)
                                 pum_height, grid_width, false, true);
   bool invalid_grid = moved || pum_invalid;
   pum_invalid = false;
+  must_redraw_pum = false;
 
   if (!pum_grid.chars
       || pum_grid.Rows != pum_height || pum_grid.Columns != grid_width) {
@@ -412,7 +410,7 @@ void pum_redraw(void)
     idx = i + pum_first;
     attr = (idx == pum_selected) ? attr_select : attr_norm;
 
-    screen_puts_line_start(row);
+    grid_puts_line_start(&pum_grid, row);
 
     // prepend a space if there is room
     if (extra_space) {
@@ -564,7 +562,7 @@ void pum_redraw(void)
                      ? attr_thumb : attr_scroll);
       }
     }
-    grid_puts_line_flush(&pum_grid, false);
+    grid_puts_line_flush(false);
     row++;
   }
 }
@@ -672,7 +670,7 @@ static int pum_set_selected(int n, int repeat)
             && (curbuf->b_p_bh[0] == 'w')) {
           // Already a "wipeout" buffer, make it empty.
           while (!BUFEMPTY()) {
-            ml_delete((linenr_T)1, FALSE);
+            ml_delete((linenr_T)1, false);
           }
         } else {
           // Don't want to sync undo in the current buffer.
@@ -697,11 +695,11 @@ static int pum_set_selected(int n, int repeat)
           for (p = pum_array[pum_selected].pum_info; *p != NUL;) {
             e = vim_strchr(p, '\n');
             if (e == NULL) {
-              ml_append(lnum++, p, 0, FALSE);
+              ml_append(lnum++, p, 0, false);
               break;
             } else {
               *e = NUL;
-              ml_append(lnum++, p, (int)(e - p + 1), FALSE);
+              ml_append(lnum++, p, (int)(e - p + 1), false);
               *e = '\n';
               p = e + 1;
             }
@@ -790,6 +788,7 @@ void pum_undisplay(bool immediate)
 {
   pum_is_visible = false;
   pum_array = NULL;
+  must_redraw_pum = false;
 
   if (immediate) {
     pum_check_clear();
@@ -850,10 +849,17 @@ void pum_recompose(void)
 /// Only valid when pum_visible() returns TRUE!
 int pum_get_height(void)
 {
+  if (pum_external) {
+    int ui_pum_height = ui_pum_get_height();
+    if (ui_pum_height) {
+      return ui_pum_height;
+    }
+  }
   return pum_height;
 }
 
-void pum_set_boundings(dict_T *dict)
+/// Add size information about the pum to "dict".
+void pum_set_event_info(dict_T *dict)
 {
   if (!pum_visible()) {
     return;

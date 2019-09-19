@@ -5,6 +5,7 @@
 
 #include "nvim/api/private/defs.h"
 #include "nvim/vim.h"
+#include "nvim/getchar.h"
 #include "nvim/memory.h"
 #include "nvim/ex_eval.h"
 #include "nvim/lib/kvec.h"
@@ -46,6 +47,10 @@
 #define DICTIONARY_OBJ(d) ((Object) { \
     .type = kObjectTypeDictionary, \
     .data.dictionary = d })
+
+#define LUAREF_OBJ(r) ((Object) { \
+    .type = kObjectTypeLuaRef, \
+    .data.luaref = r })
 
 #define NIL ((Object) {.type = kObjectTypeNil})
 

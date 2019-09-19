@@ -5,8 +5,7 @@ local command = helpers.command
 local feed_command = helpers.feed_command
 local eq = helpers.eq
 local eval = helpers.eval
-local iswin = helpers.iswin
-local sleep = helpers.sleep
+local nvim_dir = helpers.nvim_dir
 
 describe('search highlighting', function()
   local screen
@@ -148,13 +147,10 @@ describe('search highlighting', function()
   end)
 
   it('is preserved during :terminal activity', function()
-    if iswin() then
-      feed([[:terminal for /L \%I in (1,1,5000) do @(echo xxx & echo xxx & echo xxx)<cr>]])
-    else
-      feed([[:terminal for i in $(seq 1 5000); do printf 'xxx\nxxx\nxxx\n'; done<cr>]])
-    end
+    feed([[:terminal "]]..nvim_dir..[[/shell-test" REP 5000 foo<cr>]])
 
     feed(':file term<CR>')
+    feed('G')  -- Follow :terminal output.
     feed(':vnew<CR>')
     insert([[
       foo bar baz
@@ -162,21 +158,8 @@ describe('search highlighting', function()
       bar foo baz
     ]])
     feed('/foo')
-    sleep(50)  -- Allow some terminal activity.
-    screen:expect([[
-        {3:foo} bar baz       {3:│}xxx                |
-        bar baz {2:foo}       {3:│}xxx                |
-        bar {2:foo} baz       {3:│}xxx                |
-                          {3:│}xxx                |
-      {1:~                   }{3:│}xxx                |
-      {5:[No Name] [+]        }{3:term               }|
-      /foo^                                    |
-    ]], { [1] = {bold = true, foreground = Screen.colors.Blue1},
-          [2] = {background = Screen.colors.Yellow},
-          [3] = {reverse = true},
-          [4] = {foreground = Screen.colors.Red},
-          [5] = {bold = true, reverse = true},
-    })
+    helpers.wait()
+    screen:expect_unchanged()
   end)
 
   it('works with incsearch', function()

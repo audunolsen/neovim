@@ -2,9 +2,6 @@
 
 func Test_block_shift_multibyte()
   " Uses double-wide character.
-  if !has('multi_byte')
-    return
-  endif
   split
   call setline(1, ['xヹxxx', 'ヹxxx'])
   exe "normal 1G0l\<C-V>jl>"
@@ -410,4 +407,28 @@ func Test_Visual_paragraph_textobject()
   call assert_equal("First line.\n\nSecond line.\nThird line.\nFourth line.\n", @")
 
   bwipe!
+endfunc
+
+" Tests for "vaBiB", end could be wrong.
+func Test_Visual_Block()
+  new
+  a
+- Bug in "vPPPP" on this text:
+	{
+		cmd;
+		{
+			cmd;\t/* <-- Start cursor here */
+			{
+			}
+		}
+	}
+.
+  normal gg
+  call search('Start cursor here')
+  normal vaBiBD
+  call assert_equal(['- Bug in "vPPPP" on this text:',
+	      \ "\t{",
+	      \ "\t}"], getline(1, '$'))
+
+  close!
 endfunc

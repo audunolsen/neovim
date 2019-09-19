@@ -277,7 +277,6 @@ enum { FOLD_TEXT_LEN = 51 };  //!< buffer size for get_foldtext()
 
 // Enums need a typecast to be used as array index (for Ultrix).
 #define HL_ATTR(n)      highlight_attr[(int)(n)]
-#define TERM_STR(n)     term_strings[(int)(n)]
 
 /// Maximum number of bytes in a multi-byte character.  It can be one 32-bit
 /// character of up to 6 bytes, or one 16-bit character of up to three bytes
@@ -288,16 +287,14 @@ enum { FOLD_TEXT_LEN = 51 };  //!< buffer size for get_foldtext()
 // functions of these names. The declarations would break if the defines had
 // been seen at that stage.  But it must be before globals.h, where error_ga
 // is declared.
-#define mch_errmsg(str)        fprintf(stderr, "%s", (str))
-#define display_errors()       fflush(stderr)
-#define mch_msg(str)           printf("%s", (str))
+#ifndef WIN32
+# define mch_errmsg(str)        fprintf(stderr, "%s", (str))
+# define mch_msg(str)           printf("%s", (str))
+#endif
 
 #include "nvim/globals.h"        // global variables and messages
 #include "nvim/buffer_defs.h"    // buffer and windows
 #include "nvim/ex_cmds_defs.h"   // Ex command defines
-
-# define SET_NO_HLSEARCH(flag) no_hlsearch = (flag); set_vim_var_nr( \
-    VV_HLSEARCH, !no_hlsearch && p_hls)
 
 // Used for flags in do_in_path()
 #define DIP_ALL 0x01    // all matches, not just the first one

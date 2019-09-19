@@ -6,6 +6,9 @@ local insert = helpers.insert
 local meths = helpers.meths
 local command = helpers.command
 local funcs = helpers.funcs
+local get_pathsep = helpers.get_pathsep
+local eq = helpers.eq
+local matches = helpers.matches
 
 describe('ui/ext_popupmenu', function()
   local screen
@@ -367,6 +370,125 @@ describe('ui/ext_popupmenu', function()
     ]])
   end)
 
+  local function source_complete_month()
+    source([[
+    function! TestCompleteMonth() abort
+    call complete(1, ['January', 'February', 'March', 'April',
+    \ 'May', 'June', 'July', 'August',
+    \ 'September', 'October', 'November', 'December'])
+    return ''
+    endfunction
+    ]])
+  end
+
+  describe('pum_set_height', function()
+    it('can be set pum height', function()
+      source_complete_month()
+      local month_expected = {
+        {'January', '', '', ''},
+        {'February', '', '', ''},
+        {'March', '', '', ''},
+        {'April', '', '', ''},
+        {'May', '', '', ''},
+        {'June', '', '', ''},
+        {'July', '', '', ''},
+        {'August', '', '', ''},
+        {'September', '', '', ''},
+        {'October', '', '', ''},
+        {'November', '', '', ''},
+        {'December', '', '', ''},
+      }
+      local pum_height = 6
+      feed('o<C-r>=TestCompleteMonth()<CR>')
+      meths.ui_pum_set_height(pum_height)
+      feed('<PageDown>')
+      -- pos becomes pum_height-2 because it is subtracting 2 to keep some
+      -- context in ins_compl_key2count()
+      screen:expect{grid=[[
+                                                                  |
+      January^                                                     |
+      {1:~                                                           }|
+      {1:~                                                           }|
+      {1:~                                                           }|
+      {1:~                                                           }|
+      {1:~                                                           }|
+      {2:-- INSERT --}                                                |
+      ]], popupmenu={
+        items=month_expected,
+        pos=pum_height-2,
+        anchor={1,1,0},
+      }}
+    end)
+
+    it('an error occurs if set 0 or less', function()
+      local ok, err, _
+      ok, _ = pcall(meths.ui_pum_set_height, 1)
+      eq(ok, true)
+      ok, err = pcall(meths.ui_pum_set_height, 0)
+      eq(ok, false)
+      matches('.*: Expected pum height > 0', err)
+    end)
+
+    it('an error occurs when ext_popupmenu is false', function()
+      local ok, err, _
+      ok, _ = pcall(meths.ui_pum_set_height, 1)
+      eq(ok, true)
+      screen:set_option('ext_popupmenu', false)
+      ok, err = pcall(meths.ui_pum_set_height, 1)
+      eq(ok, false)
+      matches('.*: It must support the ext_popupmenu option', err)
+    end)
+  end)
+
+  it('<PageUP>, <PageDown> works without ui_pum_set_height', function()
+    source_complete_month()
+    local month_expected = {
+      {'January', '', '', ''},
+      {'February', '', '', ''},
+      {'March', '', '', ''},
+      {'April', '', '', ''},
+      {'May', '', '', ''},
+      {'June', '', '', ''},
+      {'July', '', '', ''},
+      {'August', '', '', ''},
+      {'September', '', '', ''},
+      {'October', '', '', ''},
+      {'November', '', '', ''},
+      {'December', '', '', ''},
+    }
+    feed('o<C-r>=TestCompleteMonth()<CR>')
+    feed('<PageDown>')
+    screen:expect{grid=[[
+                                                                |
+    January^                                                     |
+    {1:~                                                           }|
+    {1:~                                                           }|
+    {1:~                                                           }|
+    {1:~                                                           }|
+    {1:~                                                           }|
+    {2:-- INSERT --}                                                |
+    ]], popupmenu={
+      items=month_expected,
+      pos=3,
+      anchor={1,1,0},
+    }}
+    feed('<PageUp>')
+    screen:expect{grid=[[
+                                                                |
+    January^                                                     |
+    {1:~                                                           }|
+    {1:~                                                           }|
+    {1:~                                                           }|
+    {1:~                                                           }|
+    {1:~                                                           }|
+    {2:-- INSERT --}                                                |
+    ]], popupmenu={
+      items=month_expected,
+      pos=0,
+      anchor={1,1,0},
+    }}
+  end)
+
   it('works with wildoptions=pum', function()
     screen:try_resize(32,10)
     command('set wildmenu')
@@ -452,6 +574,22 @@ describe('ui/ext_popupmenu', function()
     ]])
     feed('<esc>')
 
+    -- #10042: make sure shift-tab also triggers the pum
+    feed(':sign <S-tab>')
+    screen:expect{grid=[[
+                                      |
+      {1:~                               }|
+      {1:~                               }|
+      {1:~                               }|
+      {1:~                               }|
+      {1:~                               }|
+      {1:~                               }|
+      {1:~                               }|
+      {1:~                               }|
+      :sign unplace^                   |
+    ]], popupmenu={items=wild_expected, pos=5, anchor={1, 9, 6}}}
+    feed('<esc>')
+
     -- check positioning with multibyte char in pattern
     command("e långfile1")
     command("sp långfile2")
@@ -472,6 +610,7 @@ describe('ui/ext_popupmenu', function()
       items = {{"långfile1", "", "", "" }, {"långfile2", "", "", ""}},
       pos = 0,
     }}
+
   end)
 end)
 
@@ -1127,7 +1266,7 @@ describe('builtin popupmenu', function()
       prefix      |
       bef{n: word  }  |
       tex{n: }^        |
-      {2:-- }{s: text   } |
+      {2:-- INSERT -} |
     ]])
 
     -- can't draw the pum, but check we don't crash
@@ -1148,6 +1287,50 @@ describe('builtin popupmenu', function()
       {1:~         }{n: thing    }|
       {1:~                   }|
       {2:-- INSERT --}        |
+    ]])
+  end)
+
+  it('behaves correcty with VimResized autocmd', function()
+    feed('isome long prefix before the ')
+    command("set completeopt+=noinsert,noselect")
+    command("autocmd VimResized * redraw!")
+    command("set linebreak")
+    funcs.complete(29, {'word', 'choice', 'text', 'thing'})
+    screen:expect([[
+      some long prefix before the ^    |
+      {1:~                        }{n: word  }|
+      {1:~                        }{n: choice}|
+      {1:~                        }{n: text  }|
+      {1:~                        }{n: thing }|
+      {1:~                               }|
+      {1:~                               }|
+      {1:~                               }|
+      {1:~                               }|
+      {1:~                               }|
+      {1:~                               }|
+      {1:~                               }|
+      {1:~                               }|
+      {1:~                               }|
+      {1:~                               }|
+      {1:~                               }|
+      {1:~                               }|
+      {1:~                               }|
+      {1:~                               }|
+      {2:-- INSERT --}                    |
+    ]])
+
+    screen:try_resize(16,10)
+    screen:expect([[
+      some long       |
+      prefix before   |
+      the ^            |
+      {1:~  }{n: word        }|
+      {1:~  }{n: choice      }|
+      {1:~  }{n: text        }|
+      {1:~  }{n: thing       }|
+      {1:~               }|
+      {1:~               }|
+      {2:-- INSERT --}    |
     ]])
   end)
 
@@ -1503,6 +1686,101 @@ describe('builtin popupmenu', function()
       {3:lå}{n: långfile2      }{3:                                }|
       :b långfile1^                                      |
     ]])
+
+    -- position is calculated correctly with "longest"
+    feed('<esc>')
+    command('set wildmode=longest:full,full')
+    feed(':b lå<tab>')
+    screen:expect([[
+                                                        |
+      {1:~                                                 }|
+      {4:långfile2                                         }|
+                                                        |
+      {1:~                                                 }|
+      {1:~                                                 }|
+      {1:~                                                 }|
+      {1:~                                                 }|
+      {1:~                                                 }|
+      {1:~                                                 }|
+      {1:~                                                 }|
+      {1:~                                                 }|
+      {1:~ }{n: långfile1      }{1:                                }|
+      {3:lå}{n: långfile2      }{3:                                }|
+      :b långfile^                                       |
+    ]])
+
+    -- special case: when patterns ends with "/", show menu items aligned
+    -- after the "/"
+    feed('<esc>')
+    command("close")
+    command('set wildmode=full')
+    command("cd test/functional/fixtures/")
+    feed(':e compdir/<tab>')
+    screen:expect([[
+                                                        |
+      {1:~                                                 }|
+      {1:~                                                 }|
+      {1:~                                                 }|
+      {1:~                                                 }|
+      {1:~                                                 }|
+      {1:~                                                 }|
+      {1:~                                                 }|
+      {1:~                                                 }|
+      {1:~                                                 }|
+      {1:~                                                 }|
+      {1:~                                                 }|
+      {1:~         }{s: file1          }{1:                        }|
+      {1:~         }{n: file2          }{1:                        }|
+      :e compdir]]..get_pathsep()..[[file1^                                  |
+    ]])
+  end)
+
+  it('works with wildoptions=pum with scrolled mesages ', function()
+    screen:try_resize(40,10)
+    command('set wildmenu')
+    command('set wildoptions=pum')
+
+    feed(':echoerr "fail"|echoerr "error"<cr>')
+    screen:expect{grid=[[
+                                              |
+      {1:~                                       }|
+      {1:~                                       }|
+      {1:~                                       }|
+      {1:~                                       }|
+      {1:~                                       }|
+      {4:                                        }|
+      {6:fail}                                    |
+      {6:error}                                   |
+      {5:Press ENTER or type command to continue}^ |
+    ]]}
+
+    feed(':sign <tab>')
+    screen:expect{grid=[[
+                                              |
+      {1:~                                       }|
+      {1:~                                       }|
+      {1:~    }{s: define         }{1:                   }|
+      {1:~    }{n: jump           }{1:                   }|
+      {1:~    }{n: list           }{1:                   }|
+      {4:     }{n: place          }{4:                   }|
+      {6:fail} {n: undefine       }                   |
+      {6:error}{n: unplace        }                   |
+      :sign define^                            |
+    ]]}
+
+    feed('d')
+    screen:expect{grid=[[
+                                              |
+      {1:~                                       }|
+      {1:~                                       }|
+      {1:~                                       }|
+      {1:~                                       }|
+      {1:~                                       }|
+      {4:                                        }|
+      {6:fail}                                    |
+      {6:error}                                   |
+      :sign defined^                           |
+    ]]}
   end)
 
   it("'pumblend' RGB-color", function()
@@ -1552,6 +1830,7 @@ describe('builtin popupmenu', function()
       [42] = {foreground = tonumber('0x0c0c0c'), background = tonumber('0xe5a8e5')},
       [43] = {background = tonumber('0x7f5d7f'), bold = true, foreground = tonumber('0x3f3f3f')},
       [44] = {foreground = tonumber('0x3f3f3f'), background = tonumber('0x7f5d7f')},
+      [45] = {background = Screen.colors.WebGray, blend=0},
     })
     command('syntax on')
     command('set mouse=a')
@@ -1650,6 +1929,26 @@ describe('builtin popupmenu', function()
       adipisicing elit, sed do eiusmod tempor                     |
       bla bla incididunt^                                          |
       incidid{25:u}{26:incididunt}{25:re et}{27: }d{1:ol}ore magna aliqua.                |
+      Ut enim{28: }{29:ut}{28: minim veniam}{25:,} quis nostrud                       |
+      exercit{28:a}{29:labore}{28:llamco la}{25:b}oris nisi ut aliquip ex             |
+      {2:[No Nam}{30:e}{43:et}{30:[+]          }{32: }{2:                                    }|
+      incidid{28:u}{29:dol}{41:or}{29:e}{28:labore et}{25: }d{1:ol}ore magna aliqua.                |
+      Ut enim{28: }{29:magna}{28:nim veniam}{25:,} quis nostrud                       |
+      exercit{28:a}{29:aliqua}{28:llamco la}{25:b}oris nisi {4:ut} aliquip ex             |
+      ea comm{28:o}{29:Ut}{28: consequat. D}{25:u}is a{4:ut}e irure d{1:ol}or in              |
+      reprehe{28:n}{29:enim}{28:t in v}{34:ol}{28:upt}{25:a}te v{3:el}it esse cillum                |
+      {5:[No Nam}{38:e}{44:ad}{38:[+]          }{40: }{5:                                    }|
+      {20:-- Keyword Local completion (^N^P) }{21:match 1 of 65}            |
+    ]])
+
+    -- can disable blending for indiviual attribute. For instance current
+    -- selected item. (also tests that `hi Pmenu*` take immediate effect)
+    command('hi PMenuSel blend=0')
+    screen:expect([[
+      Lorem ipsum d{1:ol}or sit amet, consectetur                     |
+      adipisicing elit, sed do eiusmod tempor                     |
+      bla bla incididunt^                                          |
+      incidid{45: incididunt     }{27: }d{1:ol}ore magna aliqua.                |
       Ut enim{28: }{29:ut}{28: minim veniam}{25:,} quis nostrud                       |
       exercit{28:a}{29:labore}{28:llamco la}{25:b}oris nisi ut aliquip ex             |
       {2:[No Nam}{30:e}{43:et}{30:[+]          }{32: }{2:                                    }|

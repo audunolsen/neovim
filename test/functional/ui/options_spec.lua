@@ -1,10 +1,9 @@
-local global_helpers = require('test.helpers')
 local helpers = require('test.functional.helpers')(after_each)
 local Screen = require('test.functional.ui.screen')
 local clear = helpers.clear
 local command = helpers.command
 local eq = helpers.eq
-local shallowcopy = global_helpers.shallowcopy
+local shallowcopy = helpers.shallowcopy
 
 describe('ui receives option updates', function()
   local screen
@@ -115,7 +114,8 @@ describe('ui receives option updates', function()
   end)
 
   local function startup_test(headless)
-    local expected = reset(nil,{headless=headless,args={'--cmd', 'set guifont=Comic\\ Sans\\ 12'}})
+    local expected = reset(nil, {args_rm=(headless and {} or {'--headless'}),
+                                 args={'--cmd', 'set guifont=Comic\\ Sans\\ 12'}})
     expected.guifont = "Comic Sans 12"
     screen:expect(function()
       eq(expected, screen.options)

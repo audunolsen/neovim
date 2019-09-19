@@ -112,12 +112,14 @@ ex_menu(exarg_T *eap)
     }
   }
   if (ascii_iswhite(*p)) {
-    for (i = 0; i < MENUDEPTH && !ascii_iswhite(*arg); ++i) {
-      pri_tab[i] = getdigits_long(&arg);
-      if (pri_tab[i] == 0)
+    for (i = 0; i < MENUDEPTH && !ascii_iswhite(*arg); i++) {
+      pri_tab[i] = getdigits_long(&arg, false, 0);
+      if (pri_tab[i] == 0) {
         pri_tab[i] = 500;
-      if (*arg == '.')
-        ++arg;
+      }
+      if (*arg == '.') {
+        arg++;
+      }
     }
     arg = skipwhite(arg);
   } else if (eap->addr_count && eap->line2 != 0) {
@@ -388,8 +390,7 @@ add_menu_path(
     menup = &menu->children;
     parent = menu;
     name = next_name;
-    xfree(dname);
-    dname = NULL;
+    XFREE_CLEAR(dname);
     if (pri_tab[pri_idx + 1] != -1) {
       pri_idx++;
     }
@@ -774,15 +775,12 @@ static vimmenu_T *find_menu(vimmenu_T *menu, char_u *name, int modes)
       if (menu_name_equal(name, menu)) {
         // Found menu
         if (*p != NUL && menu->children == NULL) {
-          if (*p != NUL) {
             EMSG(_(e_notsubmenu));
             return NULL;
-          } else if ((menu->modes & modes) == 0x0) {
-            EMSG(_(e_othermode));
-            return NULL;
-          }
-        }
-        if (*p == NUL) {  // found a full match
+        } else if ((menu->modes & modes) == 0x0) {
+          EMSG(_(e_othermode));
+          return NULL;
+        } else if (*p == NUL) {  // found a full match
           return menu;
         }
         break;
@@ -1374,7 +1372,7 @@ void ex_emenu(exarg_T *eap)
 
   /* Found the menu, so execute.
    * Use the Insert mode entry when returning to Insert mode. */
-  if (((State & INSERT) || restart_edit) && !current_SID) {
+  if (((State & INSERT) || restart_edit) && !current_sctx.sc_sid) {
     mode = (char_u *)"Insert";
     idx = MENU_INDEX_INSERT;
   } else if (State & CMDLINE) {
@@ -1435,7 +1433,7 @@ void ex_emenu(exarg_T *eap)
   if (menu->strings[idx] != NULL) {
     // When executing a script or function execute the commands right now.
     // Otherwise put them in the typeahead buffer.
-    if (current_SID != 0) {
+    if (current_sctx.sc_sid != 0) {
       exec_normal_cmd(menu->strings[idx], menu->noremap[idx],
                       menu->silent[idx]);
     } else {

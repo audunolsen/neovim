@@ -247,9 +247,9 @@
 
 #define BRACE_COMPLEX   140 /* -149 node Match nodes between m & n times */
 
-#define NOPEN           150     /*	Mark this point in input as start of
-                                 \%( subexpr. */
-#define NCLOSE          151     /*	Analogous to NOPEN. */
+#define NOPEN           150     // Mark this point in input as start of
+                                // \%( subexpr.
+#define NCLOSE          151     // Analogous to NOPEN.
 
 #define MULTIBYTECODE   200     /* mbc	Match one multi-byte character */
 #define RE_BOF          201     /*	Match "" at beginning of file. */
@@ -348,13 +348,13 @@ typedef enum regstate_E {
  * more things.
  */
 typedef struct regitem_S {
-  regstate_T rs_state;          /* what we are doing, one of RS_ above */
-  char_u      *rs_scan;         /* current node in program */
+  regstate_T rs_state;          // what we are doing, one of RS_ above
+  uint16_t   rs_no;             // submatch nr or BEHIND/NOBEHIND
+  char_u     *rs_scan;          // current node in program
   union {
     save_se_T sesave;
     regsave_T regsave;
-  } rs_un;                      /* room for saving reginput */
-  short rs_no;                  /* submatch nr or BEHIND/NOBEHIND */
+  } rs_un;                      // room for saving reginput
 } regitem_T;
 
 
@@ -2058,10 +2058,14 @@ static char_u *regatom(int *flagp)
             EMSG2_RET_NULL(_(e_missing_sb),
                 reg_magic == MAGIC_ALL);
           br = regnode(BRANCH);
-          if (ret == NULL)
+          if (ret == NULL) {
             ret = br;
-          else
+          } else {
             regtail(lastnode, br);
+            if (reg_toolong) {
+              return NULL;
+            }
+          }
 
           ungetchr();
           one_exactly = TRUE;
@@ -2083,6 +2087,9 @@ static char_u *regatom(int *flagp)
           for (br = ret; br != lastnode; ) {
             if (OP(br) == BRANCH) {
               regtail(br, lastbranch);
+              if (reg_toolong) {
+                return NULL;
+              }
               br = OPERAND(br);
             } else
               br = regnext(br);
@@ -3098,23 +3105,26 @@ static int read_limits(long *minval, long *maxval)
   long tmp;
 
   if (*regparse == '-') {
-    /* Starts with '-', so reverse the range later */
+    // Starts with '-', so reverse the range later.
     regparse++;
     reverse = TRUE;
   }
   first_char = regparse;
-  *minval = getdigits_long(&regparse);
-  if (*regparse == ',') {           /* There is a comma */
-    if (ascii_isdigit(*++regparse))
-      *maxval = getdigits_long(&regparse);
-    else
+  *minval = getdigits_long(&regparse, false, 0);
+  if (*regparse == ',') {           // There is a comma.
+    if (ascii_isdigit(*++regparse)) {
+      *maxval = getdigits_long(&regparse, false, MAX_LIMIT);
+    } else {
       *maxval = MAX_LIMIT;
-  } else if (ascii_isdigit(*first_char))
-    *maxval = *minval;              /* It was \{n} or \{-n} */
-  else
-    *maxval = MAX_LIMIT;            /* It was \{} or \{-} */
-  if (*regparse == '\\')
-    regparse++;         /* Allow either \{...} or \{...\} */
+    }
+  } else if (ascii_isdigit(*first_char)) {
+    *maxval = *minval;              // It was \{n} or \{-n}
+  } else {
+    *maxval = MAX_LIMIT;            // It was \{} or \{-}
+  }
+  if (*regparse == '\\') {
+    regparse++;         // Allow either \{...} or \{...\}
+  }
   if (*regparse != '}') {
     sprintf((char *)IObuff, _("E554: Syntax error in %s{...}"),
         reg_magic == MAGIC_ALL ? "" : "\\");
@@ -3550,8 +3560,7 @@ theend:
   /* Free "reg_tofree" when it's a bit big.
    * Free regstack and backpos if they are bigger than their initial size. */
   if (reg_tofreelen > 400) {
-    xfree(reg_tofree);
-    reg_tofree = NULL;
+    XFREE_CLEAR(reg_tofree);
   }
   if (regstack.ga_maxlen > REGSTACK_INITIAL)
     ga_clear(&regstack);
@@ -4317,8 +4326,10 @@ static int regmatch(
             /* Still at same position as last time, fail. */
             status = RA_NOMATCH;
 
-          if (status != RA_FAIL && status != RA_NOMATCH)
+          assert(status != RA_FAIL);
+          if (status != RA_NOMATCH) {
             reg_save(&bp[i].bp_pos, &backpos);
+          }
         }
         break;
 
@@ -5098,8 +5109,6 @@ static int regmatch(
         printf("Premature EOL\n");
 #endif
       }
-      if (status == RA_FAIL)
-        got_int = TRUE;
       return status == RA_MATCH;
     }
 
@@ -5516,6 +5525,7 @@ do_class:
  * there is an error.
  */
 static char_u *regnext(char_u *p)
+  FUNC_ATTR_NONNULL_ALL
 {
   int offset;
 
@@ -6620,8 +6630,7 @@ static int vim_regsub_both(char_u *source, typval_T *expr, char_u *dest,
       if (eval_result != NULL) {
         STRCPY(dest, eval_result);
         dst += STRLEN(eval_result);
-        xfree(eval_result);
-        eval_result = NULL;
+        XFREE_CLEAR(eval_result);
       }
     } else {
       int prev_can_f_submatch = can_f_submatch;
@@ -7226,7 +7235,8 @@ static void report_re_switch(char_u *pat)
 /// @param nl
 ///
 /// @return TRUE if there is a match, FALSE if not.
-static int vim_regexec_both(regmatch_T *rmp, char_u *line, colnr_T col, bool nl)
+static int vim_regexec_string(regmatch_T *rmp, char_u *line, colnr_T col,
+                              bool nl)
 {
   regexec_T rex_save;
   bool rex_in_use_save = rex_in_use;
@@ -7275,8 +7285,8 @@ static int vim_regexec_both(regmatch_T *rmp, char_u *line, colnr_T col, bool nl)
 int vim_regexec_prog(regprog_T **prog, bool ignore_case, char_u *line,
                       colnr_T col)
 {
-  regmatch_T regmatch = {.regprog = *prog, .rm_ic = ignore_case};
-  int r = vim_regexec_both(&regmatch, line, col, false);
+  regmatch_T regmatch = { .regprog = *prog, .rm_ic = ignore_case };
+  int r = vim_regexec_string(&regmatch, line, col, false);
   *prog = regmatch.regprog;
   return r;
 }
@@ -7285,7 +7295,7 @@ int vim_regexec_prog(regprog_T **prog, bool ignore_case, char_u *line,
 // Return TRUE if there is a match, FALSE if not.
 int vim_regexec(regmatch_T *rmp, char_u *line, colnr_T col)
 {
-  return vim_regexec_both(rmp, line, col, false);
+  return vim_regexec_string(rmp, line, col, false);
 }
 
 // Like vim_regexec(), but consider a "\n" in "line" to be a line break.
@@ -7293,7 +7303,7 @@ int vim_regexec(regmatch_T *rmp, char_u *line, colnr_T col)
 // Return TRUE if there is a match, FALSE if not.
 int vim_regexec_nl(regmatch_T *rmp, char_u *line, colnr_T col)
 {
-  return vim_regexec_both(rmp, line, col, true);
+  return vim_regexec_string(rmp, line, col, true);
 }
 
 /// Match a regexp against multiple lines.

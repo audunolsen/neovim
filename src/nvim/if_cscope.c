@@ -16,11 +16,10 @@
 #include <inttypes.h>
 #include <fcntl.h>
 
-#include "nvim/vim.h"
+#include "nvim/buffer.h"
 #include "nvim/ascii.h"
 #include "nvim/if_cscope.h"
 #include "nvim/charset.h"
-#include "nvim/eval.h"
 #include "nvim/fileio.h"
 #include "nvim/message.h"
 #include "nvim/memory.h"
@@ -29,7 +28,6 @@
 #include "nvim/quickfix.h"
 #include "nvim/strings.h"
 #include "nvim/tag.h"
-#include "nvim/window.h"
 #include "nvim/os/os.h"
 #include "nvim/os/input.h"
 #include "nvim/event/stream.h"
@@ -427,9 +425,11 @@ cs_add_common(
   expand_env((char_u *)arg1, (char_u *)fname, MAXPATHL);
   size_t len = STRLEN(fname);
   fbuf = (char_u *)fname;
-  (void)modify_fname((char_u *)":p", &usedlen, (char_u **)&fname, &fbuf, &len);
-  if (fname == NULL)
+  (void)modify_fname((char_u *)":p", false, &usedlen,
+                     (char_u **)&fname, &fbuf, &len);
+  if (fname == NULL) {
     goto add_err;
+  }
   fname = (char *)vim_strnsave((char_u *)fname, len);
   xfree(fbuf);
   FileInfo file_info;
@@ -1008,10 +1008,10 @@ static int cs_find_common(char *opt, char *pat, int forceit, int verbose,
     qf_info_T   *qi = NULL;
     win_T       *wp = NULL;
 
-    f = mch_fopen((char *)tmp, "w");
-    if (f == NULL)
+    f = os_fopen((char *)tmp, "w");
+    if (f == NULL) {
       EMSG2(_(e_notopen), tmp);
-    else {
+    } else {
       cs_file_results(f, nummatches);
       fclose(f);
       if (use_ll)           /* Use location list */
@@ -1524,39 +1524,40 @@ static void cs_fill_results(char *tagstr, size_t totmatches, int *nummatches_a,
       }
 
       totsofar++;
-
-    }     /* for all matches */
+    }     // for all matches
 
     (void)cs_read_prompt(i);
-
-  }   /* for all cscope connections */
+  }   // for all cscope connections
 
   if (totsofar == 0) {
-    /* No matches, free the arrays and return NULL in "*matches_p". */
-    xfree(matches);
-    matches = NULL;
-    xfree(cntxts);
-    cntxts = NULL;
+    // No matches, free the arrays and return NULL in "*matches_p".
+    XFREE_CLEAR(matches);
+    XFREE_CLEAR(cntxts);
   }
   *matched = totsofar;
   *matches_p = matches;
   *cntxts_p = cntxts;
 
   xfree(buf);
-} /* cs_fill_results */
+}  // cs_fill_results
 
 
 /* get the requested path components */
 static char *cs_pathcomponents(char *path)
 {
-  if (p_cspc == 0)
+  if (p_cspc == 0) {
     return path;
+  }
 
   char *s = path + strlen(path) - 1;
-  for (int i = 0; i < p_cspc; ++i)
-    while (s > path && *--s != '/') continue;
-  if ((s > path && *s == '/'))
-    ++s;
+  for (int i = 0; i < p_cspc; i++) {
+    while (s > path && *--s != '/') {
+      continue;
+    }
+  }
+  if ((s > path && *s == '/')) {
+    s++;
+  }
   return s;
 }
 
@@ -1647,7 +1648,7 @@ static void cs_print_tags_priv(char **matches, char **cntxts,
     assert(buf_len >= 0);
 
     // Print the context only if it fits on the same line.
-    if (msg_col + buf_len >= (int)Columns) {
+    if (msg_col + buf_len >= Columns) {
       msg_putchar('\n');
     }
     msg_advance(12);

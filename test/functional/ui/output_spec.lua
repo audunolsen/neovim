@@ -12,8 +12,6 @@ local command = helpers.command
 local nvim_dir = helpers.nvim_dir
 
 describe("shell command :!", function()
-  if helpers.pending_win32(pending) then return end
-
   local screen
   before_each(function()
     clear()
@@ -36,6 +34,7 @@ describe("shell command :!", function()
   end)
 
   it("displays output without LF/EOF. #4646 #4569 #3772", function()
+    if helpers.pending_win32(pending) then return end
     -- NOTE: We use a child nvim (within a :term buffer)
     --       to avoid triggering a UI flush.
     child_session.feed_data(":!printf foo; sleep 200\n")
@@ -51,12 +50,11 @@ describe("shell command :!", function()
   end)
 
   it("throttles shell-command output greater than ~10KB", function()
-    if helpers.skip_fragile(pending,
-        (os.getenv("TRAVIS") and helpers.os_name() == "osx")) then
+    if 'openbsd' == helpers.uname() then
+      pending('FIXME #10804', function() end)
       return
     end
-    child_session.feed_data(
-      ":!for i in $(seq 2 30000); do echo XXXXXXXXXX $i; done\n")
+    child_session.feed_data(":!"..nvim_dir.."/shell-test REP 30001 foo\n")
 
     -- If we observe any line starting with a dot, then throttling occurred.
     -- Avoid false failure on slow systems.
@@ -65,10 +63,10 @@ describe("shell command :!", function()
     -- Final chunk of output should always be displayed, never skipped.
     -- (Throttling is non-deterministic, this test is merely a sanity check.)
     screen:expect([[
-      XXXXXXXXXX 29997                                  |
-      XXXXXXXXXX 29998                                  |
-      XXXXXXXXXX 29999                                  |
-      XXXXXXXXXX 30000                                  |
+      29997: foo                                        |
+      29998: foo                                        |
+      29999: foo                                        |
+      30000: foo                                        |
                                                         |
       {10:Press ENTER or type command to continue}{1: }          |
       {3:-- TERMINAL --}                                    |

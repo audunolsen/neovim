@@ -18,6 +18,7 @@
 #include "nvim/ascii.h"
 #include "nvim/diff.h"
 #include "nvim/buffer.h"
+#include "nvim/change.h"
 #include "nvim/charset.h"
 #include "nvim/cursor.h"
 #include "nvim/eval.h"
@@ -662,8 +663,7 @@ static void diff_redraw(int dofold)
 static void clear_diffin(diffin_T *din)
 {
   if (din->din_fname == NULL) {
-    xfree(din->din_mmfile.ptr);
-    din->din_mmfile.ptr = NULL;
+    XFREE_CLEAR(din->din_mmfile.ptr);
   } else {
     os_remove((char *)din->din_fname);
   }
@@ -952,7 +952,7 @@ static int check_external_diff(diffio_T *diffio)
   TriState ok = kFalse;
   for (;;) {
     ok = kFalse;
-    FILE *fd = mch_fopen((char *)diffio->dio_orig.din_fname, "w");
+    FILE *fd = os_fopen((char *)diffio->dio_orig.din_fname, "w");
 
     if (fd == NULL) {
       io_error = true;
@@ -961,7 +961,7 @@ static int check_external_diff(diffio_T *diffio)
         io_error = true;
       }
       fclose(fd);
-      fd = mch_fopen((char *)diffio->dio_new.din_fname, "w");
+      fd = os_fopen((char *)diffio->dio_new.din_fname, "w");
 
       if (fd == NULL) {
         io_error = true;
@@ -972,7 +972,7 @@ static int check_external_diff(diffio_T *diffio)
         fclose(fd);
         fd = NULL;
         if (diff_file(diffio) == OK) {
-          fd = mch_fopen((char *)diffio->dio_diff.dout_fname, "r");
+          fd = os_fopen((char *)diffio->dio_diff.dout_fname, "r");
         }
 
         if (fd == NULL) {
@@ -1506,7 +1506,7 @@ static void diff_read(int idx_orig, int idx_new, diffout_T *dout)
   if (dout->dout_fname == NULL) {
     diffstyle = DIFF_UNIFIED;
   } else {
-    fd = mch_fopen((char *)dout->dout_fname, "r");
+    fd = os_fopen((char *)dout->dout_fname, "r");
     if (fd == NULL) {
       EMSG(_("E98: Cannot read diff output"));
       return;
@@ -2113,7 +2113,7 @@ int diffopt_changed(void)
       diff_flags_new |= DIFF_FILLER;
     } else if ((STRNCMP(p, "context:", 8) == 0) && ascii_isdigit(p[8])) {
       p += 8;
-      diff_context_new = getdigits_int(&p);
+      diff_context_new = getdigits_int(&p, false, diff_context_new);
     } else if (STRNCMP(p, "iblank", 6) == 0) {
       p += 6;
       diff_flags_new |= DIFF_IBLANK;
@@ -2137,7 +2137,7 @@ int diffopt_changed(void)
       diff_flags_new |= DIFF_VERTICAL;
     } else if ((STRNCMP(p, "foldcolumn:", 11) == 0) && ascii_isdigit(p[11])) {
       p += 11;
-      diff_foldcolumn_new = getdigits_int(&p);
+      diff_foldcolumn_new = getdigits_int(&p, false, diff_foldcolumn_new);
     } else if (STRNCMP(p, "hiddenoff", 9) == 0) {
       p += 9;
       diff_flags_new |= DIFF_HIDDEN_OFF;
@@ -2191,7 +2191,7 @@ int diffopt_changed(void)
   }
 
   diff_flags = diff_flags_new;
-  diff_context = diff_context_new;
+  diff_context = diff_context_new == 0 ? 1 : diff_context_new;
   diff_foldcolumn = diff_foldcolumn_new;
   diff_algorithm = diff_algorithm_new;
 
@@ -3000,10 +3000,10 @@ static int parse_diff_ed(char_u     *line,
   // append: {first}a{first}[,{last}]
   // delete: {first}[,{last}]d{first}
   p = line;
-  f1 = getdigits(&p);
+  f1 = getdigits(&p, true, 0);
   if (*p == ',') {
     p++;
-    l1 = getdigits(&p);
+    l1 = getdigits(&p, true, 0);
   } else {
     l1 = f1;
   }
@@ -3011,10 +3011,10 @@ static int parse_diff_ed(char_u     *line,
     return FAIL;        // invalid diff format
   }
   difftype = *p++;
-  f2 = getdigits(&p);
+  f2 = getdigits(&p, true, 0);
   if (*p == ',') {
     p++;
-    l2 = getdigits(&p);
+    l2 = getdigits(&p, true, 0);
   } else {
     l2 = f2;
   }
@@ -3056,18 +3056,18 @@ static int parse_diff_unified(char_u        *line,
   // @@ -oldline,oldcount +newline,newcount @@
   p = line;
   if (*p++ == '@' && *p++ == '@' && *p++ == ' ' && *p++ == '-') {
-    oldline = getdigits(&p);
+    oldline = getdigits(&p, true, 0);
     if (*p == ',') {
       p++;
-      oldcount = getdigits(&p);
+      oldcount = getdigits(&p, true, 0);
     } else {
       oldcount = 1;
     }
     if (*p++ == ' ' && *p++ == '+') {
-      newline = getdigits(&p);
+      newline = getdigits(&p, true, 0);
       if (*p == ',') {
         p++;
-        newcount = getdigits(&p);
+        newcount = getdigits(&p, true, 0);
       } else {
         newcount = 1;
       }

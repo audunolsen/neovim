@@ -923,8 +923,7 @@ end_do_tag:
  */
 void tag_freematch(void)
 {
-  xfree(tagmatchname);
-  tagmatchname = NULL;
+  XFREE_CLEAR(tagmatchname);
 }
 
 static void taglen_advance(int l)
@@ -1304,8 +1303,9 @@ find_tags (
           }
         }
 
-        if ((fp = mch_fopen((char *)tag_fname, "r")) == NULL)
+        if ((fp = os_fopen((char *)tag_fname, "r")) == NULL) {
           continue;
+        }
 
         if (p_verbose >= 5) {
           verbose_enter();
@@ -1832,9 +1832,9 @@ parse_line:
             // Don't add identical matches.
             // Add all cscope tags, because they are all listed.
             // "mfp" is used as a hash key, there is a NUL byte to end
-            // the part matters for comparing, more bytes may follow
-            // after it.  E.g. help tags store the priority after the
-            // NUL.
+            // the part that matters for comparing, more bytes may
+            // follow after it.  E.g. help tags store the priority
+            // after the NUL.
             if (use_cscope) {
               hash++;
             } else {
@@ -1970,7 +1970,13 @@ static garray_T tag_fnames = GA_EMPTY_INIT_VALUE;
  */
 static void found_tagfile_cb(char_u *fname, void *cookie)
 {
-  GA_APPEND(char_u *, &tag_fnames, vim_strsave(fname));
+  char_u *const tag_fname = vim_strsave(fname);
+
+#ifdef BACKSLASH_IN_FILENAME
+    slash_adjust(tag_fname);
+#endif
+  simplify_filename(tag_fname);
+  GA_APPEND(char_u *, &tag_fnames, tag_fname);
 }
 
 #if defined(EXITFREE)
@@ -1981,8 +1987,7 @@ void free_tag_stuff(void)
   tag_freematch();
 
   if (ptag_entry.tagname) {
-    xfree(ptag_entry.tagname);
-    ptag_entry.tagname = NULL;
+    XFREE_CLEAR(ptag_entry.tagname);
   }
 }
 
@@ -2028,9 +2033,20 @@ get_tagfname (
       ++tnp->tn_hf_idx;
       STRCPY(buf, p_hf);
       STRCPY(path_tail(buf), "tags");
-    } else
-      STRLCPY(buf, ((char_u **)(tag_fnames.ga_data))[
-            tnp->tn_hf_idx++], MAXPATHL);
+#ifdef BACKSLASH_IN_FILENAME
+      slash_adjust(buf);
+#endif
+      simplify_filename(buf);
+
+      for (int i = 0; i < tag_fnames.ga_len; i++) {
+        if (STRCMP(buf, ((char_u **)(tag_fnames.ga_data))[i]) == 0) {
+          return FAIL;  // avoid duplicate file names
+        }
+      }
+    } else {
+      STRLCPY(buf, ((char_u **)(tag_fnames.ga_data))[tnp->tn_hf_idx++],
+              MAXPATHL);
+    }
     return OK;
   }
 
@@ -2220,8 +2236,13 @@ parse_match (
     p = tagp->command;
     if (find_extra(&p) == OK) {
       tagp->command_end = p;
-      p += 2;           /* skip ";\"" */
-      if (*p++ == TAB)
+      if (p > tagp->command && p[-1] == '|') {
+        tagp->command_end = p - 1;  // drop trailing bar
+      } else {
+        tagp->command_end = p;
+      }
+      p += 2;  // skip ";\""
+      if (*p++ == TAB) {
         while (ASCII_ISALPHA(*p)) {
           if (STRNCMP(p, "kind:", 5) == 0) {
             tagp->tagkind = p + 5;
@@ -2237,6 +2258,7 @@ parse_match (
             break;
           p = pt + 1;
         }
+      }
     }
     if (tagp->tagkind != NULL) {
       for (p = tagp->tagkind;
@@ -2288,7 +2310,6 @@ static int jumpto_tag(
   int retval = FAIL;
   int getfile_result = GETFILE_UNUSED;
   int search_options;
-  int save_no_hlsearch;
   win_T       *curwin_save = NULL;
   char_u      *full_fname = NULL;
   const bool old_KeyTyped = KeyTyped;       // getting the file may reset it
@@ -2431,9 +2452,9 @@ static int jumpto_tag(
     secure = 1;
     ++sandbox;
     save_magic = p_magic;
-    p_magic = FALSE;            /* always execute with 'nomagic' */
-    /* Save value of no_hlsearch, jumping to a tag is not a real search */
-    save_no_hlsearch = no_hlsearch;
+    p_magic = false;            // always execute with 'nomagic'
+    // Save value of no_hlsearch, jumping to a tag is not a real search
+    const bool save_no_hlsearch = no_hlsearch;
 
     /*
      * If 'cpoptions' contains 't', store the search pattern for the "n"
@@ -2538,7 +2559,7 @@ static int jumpto_tag(
     --sandbox;
     /* restore no_hlsearch when keeping the old search pattern */
     if (search_options) {
-      SET_NO_HLSEARCH(save_no_hlsearch);
+      set_no_hlsearch(save_no_hlsearch);
     }
 
     // Return OK if jumped to another file (at least we found the file!).
@@ -2661,22 +2682,30 @@ static int find_extra(char_u **pp)
 {
   char_u      *str = *pp;
 
-  /* Repeat for addresses separated with ';' */
+  // Repeat for addresses separated with ';'
   for (;; ) {
-    if (ascii_isdigit(*str))
+    if (ascii_isdigit(*str)) {
       str = skipdigits(str);
-    else if (*str == '/' || *str == '?') {
-      str = skip_regexp(str + 1, *str, FALSE, NULL);
-      if (*str != **pp)
+    } else if (*str == '/' || *str == '?') {
+      str = skip_regexp(str + 1, *str, false, NULL);
+      if (*str != **pp) {
         str = NULL;
-      else
-        ++str;
-    } else
-      str = NULL;
+      } else {
+        str++;
+      }
+    } else {
+      // not a line number or search string, look for terminator.
+      str = (char_u *)strstr((char *)str, "|;\"");
+      if (str != NULL) {
+        str++;
+        break;
+      }
+    }
     if (str == NULL || *str != ';'
-        || !(ascii_isdigit(str[1]) || str[1] == '/' || str[1] == '?'))
+        || !(ascii_isdigit(str[1]) || str[1] == '/' || str[1] == '?')) {
       break;
-    ++str;      /* skip ';' */
+    }
+    str++;  // skip ';'
   }
 
   if (str != NULL && STRNCMP(str, ";\"", 2) == 0) {
@@ -2741,10 +2770,11 @@ expand_tags (
 static int 
 add_tag_field (
     dict_T *dict,
-    char *field_name,
-    char_u *start,                 /* start of the value */
-    char_u *end                   /* after the value; can be NULL */
+    const char *field_name,
+    const char_u *start,          // start of the value
+    const char_u *end             // after the value; can be NULL
 )
+  FUNC_ATTR_NONNULL_ARG(1, 2)
 {
   int len = 0;
   int retval;
@@ -2782,7 +2812,7 @@ add_tag_field (
 int get_tags(list_T *list, char_u *pat, char_u *buf_fname)
 {
   int num_matches, i, ret;
-  char_u      **matches, *p;
+  char_u      **matches;
   char_u      *full_fname;
   dict_T      *dict;
   tagptrs_T tp;
@@ -2820,16 +2850,16 @@ int get_tags(list_T *list, char_u *pat, char_u *buf_fname)
       xfree(full_fname);
 
       if (tp.command_end != NULL) {
-        for (p = tp.command_end + 3;
-             *p != NUL && *p != '\n' && *p != '\r'; ++p) {
-          if (p == tp.tagkind || (p + 5 == tp.tagkind
-                                  && STRNCMP(p, "kind:", 5) == 0))
-            /* skip "kind:<kind>" and "<kind>" */
+        for (char_u *p = tp.command_end + 3;
+             *p != NUL && *p != '\n' && *p != '\r'; p++) {
+          if (p == tp.tagkind
+              || (p + 5 == tp.tagkind && STRNCMP(p, "kind:", 5) == 0)) {
+            // skip "kind:<kind>" and "<kind>"
             p = tp.tagkind_end - 1;
-          else if (STRNCMP(p, "file:", 5) == 0)
-            /* skip "file:" (static tag) */
+          } else if (STRNCMP(p, "file:", 5) == 0) {
+            // skip "file:" (static tag)
             p += 4;
-          else if (!ascii_iswhite(*p)) {
+          } else if (!ascii_iswhite(*p)) {
             char_u  *s, *n;
             int len;
 
@@ -2862,4 +2892,178 @@ int get_tags(list_T *list, char_u *pat, char_u *buf_fname)
     xfree(matches);
   }
   return ret;
+}
+
+// Return information about 'tag' in dict 'retdict'.
+static void get_tag_details(taggy_T *tag, dict_T *retdict)
+{
+  list_T *pos;
+  fmark_T *fmark;
+
+  tv_dict_add_str(retdict, S_LEN("tagname"), (const char *)tag->tagname);
+  tv_dict_add_nr(retdict, S_LEN("matchnr"), tag->cur_match + 1);
+  tv_dict_add_nr(retdict, S_LEN("bufnr"), tag->cur_fnum);
+
+  pos = tv_list_alloc(4);
+  tv_dict_add_list(retdict, S_LEN("from"), pos);
+
+  fmark = &tag->fmark;
+  tv_list_append_number(pos,
+                        (varnumber_T)(fmark->fnum != -1 ? fmark->fnum : 0));
+  tv_list_append_number(pos, (varnumber_T)fmark->mark.lnum);
+  tv_list_append_number(pos, (varnumber_T)(fmark->mark.col == MAXCOL
+                                           ? MAXCOL : fmark->mark.col + 1));
+  tv_list_append_number(pos, (varnumber_T)fmark->mark.coladd);
+}
+
+// Return the tag stack entries of the specified window 'wp' in dictionary
+// 'retdict'.
+void get_tagstack(win_T *wp, dict_T *retdict)
+{
+  list_T *l;
+  int i;
+  dict_T *d;
+
+  tv_dict_add_nr(retdict, S_LEN("length"), wp->w_tagstacklen);
+  tv_dict_add_nr(retdict, S_LEN("curidx"), wp->w_tagstackidx + 1);
+  l = tv_list_alloc(2);
+  tv_dict_add_list(retdict, S_LEN("items"), l);
+
+  for (i = 0; i < wp->w_tagstacklen; i++) {
+    d = tv_dict_alloc();
+    tv_list_append_dict(l, d);
+    get_tag_details(&wp->w_tagstack[i], d);
+  }
+}
+
+// Free all the entries in the tag stack of the specified window
+static void tagstack_clear(win_T *wp)
+{
+  // Free the current tag stack
+  for (int i = 0; i < wp->w_tagstacklen; i++) {
+    xfree(wp->w_tagstack[i].tagname);
+  }
+  wp->w_tagstacklen = 0;
+  wp->w_tagstackidx = 0;
+}
+
+// Remove the oldest entry from the tag stack and shift the rest of
+// the entires to free up the top of the stack.
+static void tagstack_shift(win_T *wp)
+{
+  taggy_T *tagstack = wp->w_tagstack;
+  xfree(tagstack[0].tagname);
+  for (int i = 1; i < wp->w_tagstacklen; i++) {
+    tagstack[i - 1] = tagstack[i];
+  }
+  wp->w_tagstacklen--;
+}
+
+// Push a new item to the tag stack
+static void tagstack_push_item(
+    win_T   *wp,
+    char_u  *tagname,
+    int     cur_fnum,
+    int     cur_match,
+    pos_T   mark,
+    int     fnum)
+{
+  taggy_T *tagstack = wp->w_tagstack;
+  int idx = wp->w_tagstacklen;  // top of the stack
+
+  // if the tagstack is full: remove the oldest entry
+  if (idx >= TAGSTACKSIZE) {
+    tagstack_shift(wp);
+    idx = TAGSTACKSIZE - 1;
+  }
+
+  wp->w_tagstacklen++;
+  tagstack[idx].tagname = tagname;
+  tagstack[idx].cur_fnum = cur_fnum;
+  tagstack[idx].cur_match = cur_match;
+  if (tagstack[idx].cur_match < 0) {
+    tagstack[idx].cur_match = 0;
+  }
+  tagstack[idx].fmark.mark = mark;
+  tagstack[idx].fmark.fnum = fnum;
+}
+
+// Add a list of items to the tag stack in the specified window
+static void tagstack_push_items(win_T *wp, list_T *l)
+{
+  listitem_T *li;
+  dictitem_T *di;
+  dict_T *itemdict;
+  char_u *tagname;
+  pos_T mark;
+  int fnum;
+
+  // Add one entry at a time to the tag stack
+  for (li = tv_list_first(l); li != NULL; li = TV_LIST_ITEM_NEXT(l, li)) {
+    if (TV_LIST_ITEM_TV(li)->v_type != VAR_DICT
+        || TV_LIST_ITEM_TV(li)->vval.v_dict == NULL) {
+      continue;  // Skip non-dict items
+    }
+    itemdict = TV_LIST_ITEM_TV(li)->vval.v_dict;
+
+    // parse 'from' for the cursor position before the tag jump
+    if ((di = tv_dict_find(itemdict, "from", -1)) == NULL) {
+      continue;
+    }
+    if (list2fpos(&di->di_tv, &mark, &fnum, NULL) != OK) {
+      continue;
+    }
+    if ((tagname = (char_u *)tv_dict_get_string(itemdict, "tagname", true))
+        == NULL) {
+      continue;
+    }
+
+    if (mark.col > 0) {
+      mark.col--;
+    }
+    tagstack_push_item(wp, tagname,
+                       (int)tv_dict_get_number(itemdict, "bufnr"),
+                       (int)tv_dict_get_number(itemdict, "matchnr") - 1,
+                       mark, fnum);
+  }
+}
+
+// Set the current index in the tag stack. Valid values are between 0
+// and the stack length (inclusive).
+static void tagstack_set_curidx(win_T *wp, int curidx)
+{
+  wp->w_tagstackidx = curidx;
+  if (wp->w_tagstackidx < 0) {  // sanity check
+    wp->w_tagstackidx = 0;
+  }
+  if (wp->w_tagstackidx > wp->w_tagstacklen) {
+    wp->w_tagstackidx = wp->w_tagstacklen;
+  }
+}
+
+// Set the tag stack entries of the specified window.
+// 'action' is set to either 'a' for append or 'r' for replace.
+int set_tagstack(win_T *wp, dict_T *d, int action)
+{
+  dictitem_T *di;
+  list_T *l;
+
+  if ((di = tv_dict_find(d, "items", -1)) != NULL) {
+    if (di->di_tv.v_type != VAR_LIST) {
+      return FAIL;
+    }
+    l = di->di_tv.vval.v_list;
+
+    if (action == 'r') {
+      tagstack_clear(wp);
+    }
+
+    tagstack_push_items(wp, l);
+  }
+
+  if ((di = tv_dict_find(d, "curidx", -1)) != NULL) {
+    tagstack_set_curidx(wp, (int)tv_get_number(&di->di_tv) - 1);
+  }
+
+  return OK;
 }

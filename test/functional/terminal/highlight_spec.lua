@@ -3,9 +3,12 @@ local Screen = require('test.functional.ui.screen')
 local thelpers = require('test.functional.terminal.helpers')
 local feed, clear, nvim = helpers.feed, helpers.clear, helpers.nvim
 local nvim_dir, command = helpers.nvim_dir, helpers.command
+local nvim_prog_abs = helpers.nvim_prog_abs
 local eq, eval = helpers.eq, helpers.eval
+local funcs = helpers.funcs
+local nvim_set = helpers.nvim_set
 
-describe(':terminal window highlighting', function()
+describe(':terminal highlight', function()
   local screen
 
   before_each(function()
@@ -15,7 +18,7 @@ describe(':terminal window highlighting', function()
       [1] = {foreground = 45},
       [2] = {background = 46},
       [3] = {foreground = 45, background = 46},
-      [4] = {bold = true, italic = true, underline = true},
+      [4] = {bold = true, italic = true, underline = true, strikethrough = true},
       [5] = {bold = true},
       [6] = {foreground = 12},
       [7] = {bold = true, reverse = true},
@@ -105,15 +108,59 @@ describe(':terminal window highlighting', function()
     thelpers.set_fg(45)
     thelpers.set_bg(46)
   end)
-  descr('bold, italics and underline', 4, function()
+  descr('bold, italics, underline and strikethrough', 4, function()
     thelpers.set_bold()
     thelpers.set_italic()
     thelpers.set_underline()
+    thelpers.set_strikethrough()
   end)
 end)
 
+it(':terminal highlight has lower precedence than editor #9964', function()
+  clear()
+  local screen = Screen.new(30, 4)
+  screen:set_default_attr_ids({
+    -- "Normal" highlight emitted by the child nvim process.
+    N_child = {foreground = tonumber('0x4040ff'), background = tonumber('0xffff40')},
+    -- "Search" highlight emitted by the child nvim process.
+    S_child = {background = tonumber('0xffff40'), italic = true, foreground = tonumber('0x4040ff')},
+    -- "Search" highlight in the parent nvim process.
+    S = {background = Screen.colors.Green, italic = true, foreground = Screen.colors.Red},
+    -- "Question" highlight in the parent nvim process.
+    Q = {background = tonumber('0xffff40'), bold = true, foreground = Screen.colors.SeaGreen4},
+  })
+  screen:attach({rgb=true})
+  -- Child nvim process in :terminal (with cterm colors).
+  funcs.termopen({
+    nvim_prog_abs(), '-n', '-u', 'NORC', '-i', 'NONE', '--cmd', nvim_set,
+    '+hi Normal ctermfg=Blue ctermbg=Yellow',
+    '+norm! ichild nvim',
+    '+norm! oline 2',
+  })
+  screen:expect([[
+    {N_child:^child nvim                    }|
+    {N_child:line 2                        }|
+    {N_child:                              }|
+                                  |
+  ]])
+  command('hi Search gui=italic guifg=Red guibg=Green cterm=italic ctermfg=Red ctermbg=Green')
+  feed('/nvim<cr>')
+  screen:expect([[
+    {N_child:child }{S:^nvim}{N_child:                    }|
+    {N_child:line 2                        }|
+    {N_child:                              }|
+    /nvim                         |
+  ]])
+  command('syntax keyword Question line')
+  screen:expect([[
+    {N_child:child }{S:^nvim}{N_child:                    }|
+    {Q:line}{N_child: 2                        }|
+    {N_child:                              }|
+    /nvim                         |
+  ]])
+end)
 
-describe('terminal window highlighting with custom palette', function()
+describe(':terminal highlight with custom palette', function()
   local screen
 
   before_each(function()
@@ -169,7 +216,7 @@ describe('synIDattr()', function()
     screen = Screen.new(50, 7)
     command('highlight Normal ctermfg=252 guifg=#ff0000 guibg=Black')
     -- Salmon #fa8072 Maroon #800000
-    command('highlight Keyword ctermfg=79 guifg=Salmon guisp=Maroon')
+    command('highlight Keyword ctermfg=79 guifg=Salmon guisp=Maroon cterm=strikethrough gui=strikethrough')
   end)
 
   it('returns cterm-color if RGB-capable UI is _not_ attached', function()
@@ -208,6 +255,12 @@ describe('synIDattr()', function()
     screen:attach({rgb=false})
     eq('252', eval('synIDattr(hlID("Normal"), "fg")'))
     eq('79', eval('synIDattr(hlID("Keyword"), "fg")'))
+  end)
+
+  it('returns "1" if group has "strikethrough" attribute', function()
+    eq('', eval('synIDattr(hlID("Normal"), "strikethrough")'))
+    eq('1', eval('synIDattr(hlID("Keyword"), "strikethrough")'))
+    eq('1', eval('synIDattr(hlID("Keyword"), "strikethrough", "gui")'))
   end)
 end)
 

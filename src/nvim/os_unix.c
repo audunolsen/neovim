@@ -45,12 +45,6 @@
 #include "nvim/os/signal.h"
 #include "nvim/msgpack_rpc/helpers.h"
 
-#ifdef HAVE_SELINUX
-# include <selinux/selinux.h>
-static int selinux_enabled = -1;
-#endif
-
-
 #ifdef INCLUDE_GENERATED_DECLARATIONS
 # include "os_unix.c.generated.h"
 #endif
@@ -63,53 +57,6 @@ static int selinux_enabled = -1;
 #  include <sys/access.h>
 # endif
 
-
-#if defined(HAVE_SELINUX)
-// Copy security info from "from_file" to "to_file".
-void mch_copy_sec(char_u *from_file, char_u *to_file)
-{
-  if (from_file == NULL)
-    return;
-
-  if (selinux_enabled == -1)
-    selinux_enabled = is_selinux_enabled();
-
-  if (selinux_enabled > 0) {
-    security_context_t from_context = NULL;
-    security_context_t to_context = NULL;
-
-    if (getfilecon((char *)from_file, &from_context) < 0) {
-      // If the filesystem doesn't support extended attributes,
-      // the original had no special security context and the
-      // target cannot have one either.
-      if (errno == EOPNOTSUPP) {
-        return;
-      }
-
-      MSG_PUTS(_("\nCould not get security context for "));
-      msg_outtrans(from_file);
-      msg_putchar('\n');
-      return;
-    }
-    if (getfilecon((char *)to_file, &to_context) < 0) {
-      MSG_PUTS(_("\nCould not get security context for "));
-      msg_outtrans(to_file);
-      msg_putchar('\n');
-      freecon (from_context);
-      return;
-    }
-    if (strcmp(from_context, to_context) != 0) {
-      if (setfilecon((char *)to_file, from_context) < 0) {
-        MSG_PUTS(_("\nCould not set security context for "));
-        msg_outtrans(to_file);
-        msg_putchar('\n');
-      }
-    }
-    freecon(to_context);
-    freecon(from_context);
-  }
-}
-#endif  // HAVE_SELINUX
 
 // Return a pointer to the ACL of file "fname" in allocated memory.
 // Return NULL if the ACL is not available for whatever reason.
@@ -422,10 +369,7 @@ int mch_expand_wildcards(int num_pat, char_u **pat, int *num_file,
     // With interactive completion, the error message is not printed.
     if (!(flags & EW_SILENT)) {
       msg_putchar('\n');                // clear bottom line quickly
-#if SIZEOF_LONG > SIZEOF_INT
-      assert(Rows <= (long)INT_MAX + 1);
-#endif
-      cmdline_row = (int)(Rows - 1);           // continue on last line
+      cmdline_row = Rows - 1;           // continue on last line
       MSG(_(e_wildexpand));
       msg_start();                    // don't overwrite this message
     }
@@ -591,7 +535,7 @@ int mch_expand_wildcards(int num_pat, char_u **pat, int *num_file,
 
     // Skip files that are not executable if we check for that.
     if (!dir && (flags & EW_EXEC)
-        && !os_can_exe((*file)[i], NULL, !(flags & EW_SHELLCMD))) {
+        && !os_can_exe((char *)(*file)[i], NULL, !(flags & EW_SHELLCMD))) {
       continue;
     }
 
@@ -606,8 +550,7 @@ int mch_expand_wildcards(int num_pat, char_u **pat, int *num_file,
   *num_file = j;
 
   if (*num_file == 0) {     // rejected all entries
-    xfree(*file);
-    *file = NULL;
+    XFREE_CLEAR(*file);
     goto notfound;
   }
 

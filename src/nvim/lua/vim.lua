@@ -1,3 +1,39 @@
+-- Nvim-Lua stdlib: the `vim` module (:help lua-stdlib)
+--
+-- Lua code lives in one of three places:
+--    1. runtime/lua/vim/ (the runtime): For "nice to have" features, e.g. the
+--       `inspect` and `lpeg` modules.
+--    2. runtime/lua/vim/shared.lua: Code shared between Nvim and tests.
+--    3. src/nvim/lua/: Compiled-into Nvim itself.
+--
+-- Guideline: "If in doubt, put it in the runtime".
+--
+-- Most functions should live directly in `vim.`, not in submodules.
+-- The only "forbidden" names are those claimed by legacy `if_lua`:
+--    $ vim
+--    :lua for k,v in pairs(vim) do print(k) end
+--    buffer
+--    open
+--    window
+--    lastline
+--    firstline
+--    type
+--    line
+--    eval
+--    dict
+--    beep
+--    list
+--    command
+--
+-- Reference (#6580):
+--    - https://github.com/luafun/luafun
+--    - https://github.com/rxi/lume
+--    - http://leafo.net/lapis/reference/utilities.html
+--    - https://github.com/torch/paths
+--    - https://github.com/bakpakin/Fennel (pretty print, repl)
+--    - https://github.com/howl-editor/howl/tree/master/lib/howl/util
+
+
 -- Internal-only until comments in #8107 are addressed.
 -- Returns:
 --    {errcode}, {output}
@@ -118,79 +154,88 @@ local function _update_package_paths()
   last_nvim_paths = cur_nvim_paths
 end
 
-local function gsplit(s, sep, plain)
-  assert(type(s) == "string")
-  assert(type(sep) == "string")
-  assert(type(plain) == "boolean" or type(plain) == "nil")
+--- Return a human-readable representation of the given object.
+---
+--@see https://github.com/kikito/inspect.lua
+--@see https://github.com/mpeterv/vinspect
+local function inspect(object, options)  -- luacheck: no unused
+  error(object, options)  -- Stub for gen_vimdoc.py
+end
 
-  local start = 1
-  local done = false
-
-  local function pass(i, j, ...)
-    if i then
-      assert(j+1 > start, "Infinite loop detected")
-      local seg = s:sub(start, i - 1)
-      start = j + 1
-      return seg, ...
-    else
-      done = true
-      return s:sub(start)
+--- Paste handler, invoked by |nvim_paste()| when a conforming UI
+--- (such as the |TUI|) pastes text into the editor.
+---
+--@see |paste|
+---
+--@param lines  |readfile()|-style list of lines to paste. |channel-lines|
+--@param phase  -1: "non-streaming" paste: the call contains all lines.
+---              If paste is "streamed", `phase` indicates the stream state:
+---                - 1: starts the paste (exactly once)
+---                - 2: continues the paste (zero or more times)
+---                - 3: ends the paste (exactly once)
+--@returns false if client should cancel the paste.
+local function paste(lines, phase) end  -- luacheck: no unused
+paste = (function()
+  local tdots, tick, got_line1 = 0, 0, false
+  return function(lines, phase)
+    local call = vim.api.nvim_call_function
+    local now = vim.loop.now()
+    local mode = call('mode', {}):sub(1,1)
+    if phase < 2 then  -- Reset flags.
+      tdots, tick, got_line1 = now, 0, false
+    elseif mode ~= 'c' then
+      vim.api.nvim_command('undojoin')
     end
-  end
-
-  return function()
-    if done then
-      return
-    end
-    if sep == '' then
-      if start == #s then
-        done = true
+    if mode == 'c' and not got_line1 then  -- cmdline-mode: paste only 1 line.
+      got_line1 = (#lines > 1)
+      vim.api.nvim_set_option('paste', true)  -- For nvim_input().
+      local line1, _ = string.gsub(lines[1], '[\r\n\012\027]', ' ')  -- Scrub.
+      vim.api.nvim_input(line1)
+      vim.api.nvim_set_option('paste', false)
+    elseif mode ~= 'c' then  -- Else: discard remaining cmdline-mode chunks.
+      if phase < 2 and mode ~= 'i' and mode ~= 'R' and mode ~= 't' then
+        vim.api.nvim_put(lines, 'c', true, true)
+        -- XXX: Normal-mode: workaround bad cursor-placement after first chunk.
+        vim.api.nvim_command('normal! a')
+      else
+        vim.api.nvim_put(lines, 'c', false, true)
       end
-      return pass(start+1, start)
     end
-    return pass(s:find(sep, start, plain))
+    if phase ~= -1 and (now - tdots >= 100) then
+      local dots = ('.'):rep(tick % 4)
+      tdots = now
+      tick = tick + 1
+      -- Use :echo because Lua print('') is a no-op, and we want to clear the
+      -- message when there are zero dots.
+      vim.api.nvim_command(('echo "%s"'):format(dots))
+    end
+    if phase == -1 or phase == 3 then
+      vim.api.nvim_command('redraw'..(tick > 1 and '|echo ""' or ''))
+    end
+    return true  -- Paste will not continue if not returning `true`.
   end
+end)()
+
+--- Defers callback `cb` until the Nvim API is safe to call.
+---
+---@see |lua-loop-callbacks|
+---@see |vim.schedule()|
+---@see |vim.in_fast_event()|
+local function schedule_wrap(cb)
+  return (function (...)
+    local args = {...}
+    vim.schedule(function() cb(unpack(args)) end)
+  end)
 end
 
-local function split(s,sep,plain)
-  local t={} for c in gsplit(s, sep, plain) do table.insert(t,c) end
-  return t
-end
-
-local function trim(s)
-  assert(type(s) == "string", "Only strings can be trimmed")
-  local result = s:gsub("^%s+", ""):gsub("%s+$", "")
-  return result
-end
-
-local deepcopy
-
-local function id(v)
-  return v
-end
-
-local deepcopy_funcs = {
-  table = function(orig)
-    local copy = {}
-    for k, v in pairs(orig) do
-      copy[deepcopy(k)] = deepcopy(v)
-    end
-    return copy
-  end,
-  number = id,
-  string = id,
-  ['nil'] = id,
-  boolean = id,
-}
-
-deepcopy = function(orig)
-  return deepcopy_funcs[type(orig)](orig)
-end
-
-local function __index(table, key)
-  if key == "inspect" then
-    table.inspect = require("vim.inspect")
-    return table.inspect
+local function __index(t, key)
+  if key == 'inspect' then
+    t.inspect = require('vim.inspect')
+    return t.inspect
+  elseif require('vim.shared')[key] ~= nil then
+    -- Expose all `vim.shared` functions on the `vim` module.
+    t[key] = require('vim.shared')[key]
+    return t[key]
   end
 end
 
@@ -199,10 +244,8 @@ local module = {
   _os_proc_children = _os_proc_children,
   _os_proc_info = _os_proc_info,
   _system = _system,
-  trim = trim,
-  split = split,
-  gsplit = gsplit,
-  deepcopy = deepcopy,
+  paste = paste,
+  schedule_wrap = schedule_wrap,
 }
 
 setmetatable(module, {
